@@ -1,0 +1,59 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Boum Irrigation System",
+        "description": "Enter your Boum account credentials.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      },
+      "tank": {
+        "title": "Tank & Controller",
+        "description": "Select the tank size and controller type. These are used to calculate the water level accurately.",
+        "data": {
+          "tank_type": "Tank size",
+          "device_model": "Controller"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the Boum API.",
+      "invalid_auth": "Invalid credentials."
+    },
+    "abort": {
+      "already_configured": "This account is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Boum Settings",
+        "description": "Change the tank size or controller type.",
+        "data": {
+          "tank_type": "Tank size",
+          "device_model": "Controller"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "water_level":      { "name": "Water Level" },
+      "temperature":      { "name": "Temperature" },
+      "temperature_esp":  { "name": "ESP Temperature" },
+      "battery_capacity": { "name": "Battery" },
+      "battery_voltage":  { "name": "Battery Voltage" },
+      "battery_current":  { "name": "Battery Current" },
+      "solar_voltage":    { "name": "Solar Voltage" },
+      "input_current":    { "name": "Input Current" },
+      "wifi_strength":    { "name": "Wi-Fi Signal" },
+      "daily_consumption":{ "name": "Daily Consumption" },
+      "tank_loss_24h":    { "name": "Water Loss (24h)" },
+      "last_irrigation":  { "name": "Last Irrigation" },
+      "days_remaining":   { "name": "Days Remaining" },
+      "days_until_empty": { "name": "Days Remaining (Forecast)" }
+    }
+  }
+}

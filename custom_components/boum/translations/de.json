@@ -1,0 +1,59 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Boum Bewässerungssystem",
+        "description": "Gib deine Boum-Zugangsdaten ein.",
+        "data": {
+          "email": "E-Mail",
+          "password": "Passwort"
+        }
+      },
+      "tank": {
+        "title": "Tankgrösse & Steuerung",
+        "description": "Wähle den Tanktyp und die Steuerung. Diese Angaben werden für die Berechnung des Füllstands benötigt.",
+        "data": {
+          "tank_type": "Tankgrösse",
+          "device_model": "Steuerung"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Verbindung zur Boum API fehlgeschlagen.",
+      "invalid_auth": "Ungültige Zugangsdaten."
+    },
+    "abort": {
+      "already_configured": "Dieses Konto ist bereits eingerichtet."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Boum Einstellungen",
+        "description": "Tankgrösse oder Steuerung anpassen.",
+        "data": {
+          "tank_type": "Tankgrösse",
+          "device_model": "Steuerung"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "water_level":      { "name": "Füllstand" },
+      "temperature":      { "name": "Temperatur" },
+      "temperature_esp":  { "name": "ESP-Temperatur" },
+      "battery_capacity": { "name": "Batterie" },
+      "battery_voltage":  { "name": "Batteriespannung" },
+      "battery_current":  { "name": "Batteriestrom" },
+      "solar_voltage":    { "name": "Solarspannung" },
+      "input_current":    { "name": "Eingangsstrom" },
+      "wifi_strength":    { "name": "WLAN-Signal" },
+      "daily_consumption":{ "name": "Tagesverbrauch" },
+      "tank_loss_24h":    { "name": "Wasserverlust (24h)" },
+      "last_irrigation":  { "name": "Letzte Bewässerung" },
+      "days_remaining":   { "name": "Wasser reicht noch" },
+      "days_until_empty": { "name": "Wasser reicht noch (Wetter)" }
+    }
+  }
+}

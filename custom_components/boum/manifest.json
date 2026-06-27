@@ -1,0 +1,10 @@
+{
+  "domain": "boum",
+  "name": "Boum",
+  "version": "0.1.0",
+  "config_flow": true,
+  "documentation": "https://github.com/leuenberger/ha-boum",
+  "requirements": [],
+  "codeowners": ["@leuenberger"],
+  "iot_class": "cloud_polling"
+}
