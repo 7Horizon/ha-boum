@@ -5,8 +5,9 @@ DOMAIN = "boum"
 UPDATE_INTERVAL = timedelta(minutes=15)
 API_BASE_URL = "https://api.boum.us/v1"
 DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-STATISTICS_HOURS = 168  # 7 days — hourly aggregates for HA statistics import
-MINUTELY_HOURS = 96    # 4 days — per-minute data for sensors and consumption
+MINUTELY_HOURS = 2              # current sensor values only
+SENSOR_STATS_HOURS = 80        # HA statistics window for sensor calculations (~3.5 days)
+STATISTICS_BACKFILL_DAYS = 7   # max API backfill on first install
 WEATHER_ENTITY = "weather.openweathermap"
 
 # Config / options keys

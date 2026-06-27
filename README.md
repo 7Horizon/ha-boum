@@ -59,36 +59,36 @@ The current volume of water in the tank in litres. Calculated by converting the 
 - **32L (Boum Core):** piecewise linear interpolation over an empirically measured lookup table from the Boum app
 - **35L / 55L:** analytic frustum (truncated cone) formula — `V = (π/3) · h · (r₁² + r₁r₂ + r₂²)` — using the geometric dimensions of the respective tank model
 
-Data source: per-minute API data (`interval=60s`), last 4 days.
+Data source: per-minute API data (`interval=60s`), last 2 hours.
 
 ---
 
 ### Daily Consumption
 **Unit:** L
 
-Total water pumped by the irrigation system in the last 24 completed hours. Calculated by summing the hourly-averaged flow rate values (`flowRate` in L/min), multiplied by 60 to convert to litres per hour, for all complete hourly buckets in the window. The current (still-running) hour is excluded to avoid a fluctuating value.
+Total water pumped by the irrigation system in the last 24 completed hours. Summed from hourly consumption values stored in HA long-term statistics (`boum:<id>_hourly_consumption`). The current (still-running) hour is excluded to avoid a fluctuating value.
 
-Data source: hourly API data (`interval=3600s`), last 7 days.
+Data source: HA long-term statistics.
 
 ---
 
 ### Water Loss (24h)
 **Unit:** L
 
-Cumulative decrease in tank level over the last 24 hours. Calculated by converting each hourly `waterTableRange` reading into litres and summing all consecutive drops. Level increases (refills, sensor noise) are ignored.
+Cumulative decrease in tank level over the last 24 hours. Calculated from the hourly water level values stored in HA long-term statistics (`boum:<id>_water_level`) by summing all consecutive drops. Level increases (refills, sensor noise) are ignored.
 
 This sensor measures actual water leaving the tank, while *Daily Consumption* measures what the pump delivered. In normal operation both values should be similar.
 
-Data source: hourly API data (`interval=3600s`).
+Data source: HA long-term statistics.
 
 ---
 
 ### Last Irrigation
 **Unit:** timestamp
 
-The timestamp of the most recent minute in which a non-zero flow rate was recorded. Updated at the next coordinator poll (every 15 minutes) after irrigation occurs.
+The most recent hour in which a non-zero flow rate was recorded. Resolved from HA long-term statistics (`boum:<id>_flow_rate`), giving up to 60 days of history. Falls back to the per-minute API window on first install before statistics exist.
 
-Data source: per-minute API data (`interval=60s`), last 4 days.
+Data source: HA long-term statistics (hourly precision).
 
 ---
 
@@ -108,7 +108,7 @@ Extra attributes:
 - `days_in_window` — number of days in the averaging window (denominator)
 - `days_with_consumption` — how many of those days had actual irrigation
 
-Data source: hourly API data (`interval=3600s`).
+Data source: HA long-term statistics.
 
 ---
 
@@ -187,10 +187,13 @@ The integration writes the following external statistics into the HA recorder (h
 
 ## Data Refresh
 
-The coordinator polls the Boum API every **15 minutes**. Two requests are made per device per poll:
+The coordinator polls the Boum API every **15 minutes**. Four requests are made per poll (one device list + three per device):
 
-- **Per-minute data** (`interval=60s`, last 4 days) — used for current sensor values and last irrigation timestamp
-- **Hourly data** (`interval=3600s`, last 7 days) — used for consumption sensors, tank loss, and HA statistics
+- **Device state** — current online/offline status
+- **Per-minute data** (`interval=60s`, last 2 hours) — current sensor values (water level, temperature, battery, etc.)
+- **Hourly data** (`interval=3600s`, incremental) — only data since the last known statistic is fetched and written to HA long-term statistics. On first install this backfills 7 days of history; on subsequent polls it typically covers 1–2 hours.
+
+Consumption, tank loss, days remaining, and last irrigation are all calculated from HA long-term statistics rather than from the API, keeping API traffic minimal.
 
 ---
 

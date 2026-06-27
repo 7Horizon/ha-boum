@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 from homeassistant.components.sensor import (
@@ -264,30 +263,11 @@ class BoumLastIrrigationSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self) -> datetime | None:
-        device_data = self.coordinator.data.get(self._device_id, {})
-        last: datetime | None = None
-        for data_key in ("minutely", "hourly"):
-            time_series = device_data.get(data_key, {}).get("timeSeries", {})
-            for point in time_series.get("flowRate", []):
-                try:
-                    rate = float(point.get("y") or 0)
-                except (TypeError, ValueError):
-                    continue
-                if rate <= 0:
-                    continue
-                try:
-                    ts = datetime.fromisoformat(point["x"].replace("Z", "+00:00"))
-                except (KeyError, ValueError, AttributeError):
-                    continue
-                if last is None or ts > last:
-                    last = ts
-            if last is not None:
-                return last
-        return None
+        return self.coordinator.data.get(self._device_id, {}).get("last_irrigation")
 
 
 class BoumDailyConsumptionSensor(CoordinatorEntity, SensorEntity):
-    """Water consumed in the last 24 complete hours (flowRate × 60, completed buckets only)."""
+    """Water consumed in the last 24 complete hours, read from HA statistics."""
 
     _attr_has_entity_name = True
     _attr_translation_key = "daily_consumption"
@@ -303,41 +283,28 @@ class BoumDailyConsumptionSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self) -> float | None:
-        series = (
+        hourly_consumption = (
             self.coordinator.data
             .get(self._device_id, {})
-            .get("hourly", {})
-            .get("timeSeries", {})
-            .get("flowRate", [])
+            .get("hass_stats", {})
+            .get("hourly_consumption", {})
         )
-        if not series:
+        if not hourly_consumption:
             return None
 
         now = datetime.now(timezone.utc)
         current_hour = now.replace(minute=0, second=0, microsecond=0)
         cutoff = now - timedelta(hours=24)
-        total = 0.0
-        found = False
 
-        for point in series:
-            try:
-                ts = datetime.fromisoformat(point["x"].replace("Z", "+00:00"))
-            except (KeyError, ValueError, AttributeError):
-                continue
-            if ts < cutoff or ts >= current_hour:
-                continue
-            try:
-                val = float(point.get("y") or 0)
-            except (TypeError, ValueError):
-                continue
-            total += val * 60.0  # avg L/min × 60 min = L per hour
-            found = True
-
-        return round(total, 1) if found else None
+        values = [
+            val for ts, val in hourly_consumption.items()
+            if cutoff <= ts < current_hour
+        ]
+        return round(sum(values), 1) if values else None
 
 
 class BoumTankLossSensor(CoordinatorEntity, SensorEntity):
-    """Cumulative water loss over the last 24 hours (level increases from refills are ignored)."""
+    """Cumulative water loss over the last 24 hours, read from HA statistics."""
 
     _attr_has_entity_name = True
     _attr_translation_key = "tank_loss_24h"
@@ -353,46 +320,27 @@ class BoumTankLossSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self) -> float | None:
-        series = (
+        water_level = (
             self.coordinator.data
             .get(self._device_id, {})
-            .get("hourly", {})
-            .get("timeSeries", {})
-            .get("waterTableRange", [])
+            .get("hass_stats", {})
+            .get("water_level", {})
         )
-        if len(series) < 2:
+        if not water_level:
             return None
 
         cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-        points: list[tuple[datetime, float]] = []
-
-        for point in series:
-            try:
-                ts = datetime.fromisoformat(point["x"].replace("Z", "+00:00"))
-            except (KeyError, ValueError, AttributeError):
-                continue
-            if ts < cutoff:
-                continue
-            try:
-                val = float(point.get("y") or 0)
-            except (TypeError, ValueError):
-                continue
-            points.append((ts, val))
-
+        points = sorted(
+            [(ts, val) for ts, val in water_level.items() if ts >= cutoff],
+            key=lambda p: p[0],
+        )
         if len(points) < 2:
             return None
 
-        points.sort(key=lambda p: p[0])
-        tank_type = self.coordinator.tank_type
-        device_model = self.coordinator.device_model
-        total_loss = 0.0
-        for i in range(len(points) - 1):
-            drop = (
-                water_level_liters(points[i][1], tank_type, device_model)
-                - water_level_liters(points[i + 1][1], tank_type, device_model)
-            )
-            if drop > 0:
-                total_loss += drop
+        total_loss = sum(
+            max(0.0, points[i][1] - points[i + 1][1])
+            for i in range(len(points) - 1)
+        )
         return round(total_loss, 1)
 
 
@@ -413,19 +361,17 @@ class BoumDaysRemainingSensor(CoordinatorEntity, SensorEntity):
         self._attr_device_info = _device_info(device_id, _device_name(coordinator, device_id))
 
     def _daily_totals(self, device_data: dict) -> dict[date, float]:
-        """Sum completed hourly flowRate buckets per day (last 7 complete days, UTC).
+        """Sum hourly consumption per day over the last 3 complete days, from HA statistics.
 
         All complete days in the window are pre-seeded with 0.0 so that days
         with no irrigation are counted in the average denominator.
         """
-        series = device_data.get("hourly", {}).get("timeSeries", {}).get("flowRate", [])
+        hourly_consumption = device_data.get("hass_stats", {}).get("hourly_consumption", {})
         now = datetime.now(timezone.utc)
         current_hour = now.replace(minute=0, second=0, microsecond=0)
         today_utc = now.date()
         cutoff = now - timedelta(days=3)
 
-        # Pre-populate every complete day in the window so zero-irrigation days
-        # are not excluded from the denominator of the average.
         yesterday = today_utc - timedelta(days=1)
         window_start = cutoff.date() + timedelta(days=1)
         totals: dict[date, float] = {}
@@ -434,20 +380,11 @@ class BoumDaysRemainingSensor(CoordinatorEntity, SensorEntity):
             totals[d] = 0.0
             d += timedelta(days=1)
 
-        for point in series:
-            try:
-                ts = datetime.fromisoformat(point["x"].replace("Z", "+00:00"))
-            except (KeyError, ValueError, AttributeError):
-                continue
+        for ts, val in hourly_consumption.items():
             if ts < cutoff or ts >= current_hour or ts.date() >= today_utc:
                 continue
-            if ts.date() not in totals:
-                continue
-            try:
-                val = float(point.get("y") or 0)
-            except (TypeError, ValueError):
-                continue
-            totals[ts.date()] += val * 60.0  # avg L/min × 60 min = L per hour
+            if ts.date() in totals:
+                totals[ts.date()] += val  # already L/h = L per hour
         return totals
 
     @property

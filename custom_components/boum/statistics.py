@@ -80,7 +80,11 @@ def import_statistics(
     tank_type: str = DEFAULT_TANK_TYPE,
     device_model: str = DEFAULT_DEVICE_MODEL,
 ) -> None:
-    """Import 7-day hourly telemetry as HA long-term statistics."""
+    """Import hourly telemetry as HA long-term statistics.
+
+    The caller is responsible for passing only the data that needs importing
+    (incremental fetch). All points in hourly_telemetry are pushed.
+    """
     try:
         from homeassistant.components.recorder.statistics import (
             async_add_external_statistics,
