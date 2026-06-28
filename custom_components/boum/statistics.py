@@ -93,6 +93,71 @@ def _build_hourly_stats(
     return result
 
 
+def import_water_usage_statistics(
+    hass: HomeAssistant,
+    device_id: str,
+    usage_by_hour: dict,
+) -> None:
+    """Write pre-computed hourly water usage (L) to HA long-term statistics.
+
+    usage_by_hour maps hour-start datetime → litres consumed that hour (≥ 0).
+    Hours with zero consumption are included so charts show a clean baseline.
+    """
+    if not usage_by_hour:
+        return
+
+    try:
+        from homeassistant.components.recorder.statistics import (
+            async_add_external_statistics,
+        )
+    except ImportError:
+        _LOGGER.warning("homeassistant.components.recorder.statistics not found; skipping")
+        return
+
+    StatisticData = StatisticMetaData = None
+    for mod in (
+        "homeassistant.components.recorder.statistics",
+        "homeassistant.components.recorder.models",
+    ):
+        try:
+            import importlib
+            m = importlib.import_module(mod)
+            StatisticData = getattr(m, "StatisticData", None)
+            StatisticMetaData = getattr(m, "StatisticMetaData", None)
+            if StatisticData and StatisticMetaData:
+                break
+        except ImportError:
+            continue
+
+    if StatisticData is None or StatisticMetaData is None:
+        _LOGGER.warning("StatisticData/StatisticMetaData not found; skipping water usage import")
+        return
+
+    try:
+        from homeassistant.components.recorder.statistics import StatisticMeanType
+        mean_kwargs: dict = {"mean_type": StatisticMeanType.ARITHMETIC}
+    except ImportError:
+        mean_kwargs = {"has_mean": True}
+
+    short_id = device_id[:8]
+    stat_id = f"{DOMAIN}:{short_id}_water_usage"
+
+    stat_data = [
+        StatisticData(start=hour, mean=val, min=val, max=val)
+        for hour, val in sorted(usage_by_hour.items())
+    ]
+    meta = StatisticMetaData(
+        **mean_kwargs,
+        has_sum=False,
+        name=f"Boum {short_id} Water Usage",
+        source=DOMAIN,
+        statistic_id=stat_id,
+        unit_of_measurement="L",
+    )
+    async_add_external_statistics(hass, meta, stat_data)
+    _LOGGER.debug("Imported %d water usage buckets for %s", len(stat_data), short_id)
+
+
 def import_statistics(
     hass: HomeAssistant,
     device_id: str,

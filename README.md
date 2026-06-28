@@ -70,10 +70,10 @@ Actual water consumed from the tank over the last 24 hours. Calculated from the 
 
 Two outlier filters are applied to prevent the ultrasonic sensor from reporting false consumption when the controller lid is opened:
 
-- **IQR filter (import)** — applied per-minute before the hourly mean is written to HA statistics. Per-minute readings that are statistical outliers (IQR method) within the same hour are excluded from the average.
-- **Spike-and-recovery filter (calculation)** — applied to already-stored hourly statistics. A reading is classified as a spike and replaced with the average of its neighbours when the level drops by ≥ 3 L *and* recovers by ≥ 50 % of that drop in the very next hour.
+- **IQR filter (import)** — applied per-minute before the hourly mean is written to `water_level`. Per-minute readings that are statistical outliers (IQR method) within the same hour are excluded from the average.
+- **Spike-and-recovery filter (computation)** — applied before writing `water_usage`. A `water_level` reading is classified as a spike and replaced with the average of its neighbours when the level drops by ≥ 3 L *and* recovers by ≥ 50 % of that drop in the very next hour.
 
-Data source: HA long-term statistics.
+Data source: HA long-term statistics (`boum:<id>_water_usage`).
 
 ---
 
@@ -122,7 +122,7 @@ Weather-aware prediction of how many days the tank will last. Combines historica
 
 **How it works:**
 
-1. **Training data** — Daily water usage totals (from tank level drops in HA long-term statistics) and daily average temperatures (from weather entity state history) for the last 30 days are paired to form training examples.
+1. **Training data** — Daily water usage totals (from `boum:<id>_water_usage` in HA long-term statistics) and daily average temperatures (from weather entity state history) for the last 30 days are paired to form training examples.
 
 2. **Model fitting** — A linear regression is fitted: `consumption = a × avg_temp + b`. Requires at least 3 days of paired data. If less data is available, a physics-based heuristic is used instead: `max(0, 0.12 × (avg_temp − 15))`, assuming evapotranspiration grows above 15 °C.
 
@@ -175,6 +175,7 @@ The integration writes the following external statistics into the HA recorder (h
 | `boum:<id>_flow_rate` | L/min | Hourly average flow rate |
 | `boum:<id>_water_pumped` | L/h | Water delivered by the pump per hour |
 | `boum:<id>_water_level` | L | Tank water level |
+| `boum:<id>_water_usage` | L | Water consumed per hour (derived from tank level drops, spike-filtered) |
 | `boum:<id>_temperature` | °C | Environment temperature |
 | `boum:<id>_temperature_esp` | °C | Controller temperature |
 | `boum:<id>_battery_capacity` | % | Battery charge |

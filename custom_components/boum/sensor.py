@@ -26,7 +26,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .coordinator import BoumCoordinator, filter_level_spikes
+from .coordinator import BoumCoordinator
 from .tank import water_level_liters
 
 _LOGGER = logging.getLogger(__name__)
@@ -283,29 +283,21 @@ class BoumDailyWaterUsageSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self) -> float | None:
-        water_level = (
+        water_usage = (
             self.coordinator.data
             .get(self._device_id, {})
             .get("hass_stats", {})
-            .get("water_level", {})
+            .get("water_usage", {})
         )
-        if not water_level:
+        if not water_usage:
             return None
 
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-        points = sorted(
-            [(ts, val) for ts, val in water_level.items() if ts >= cutoff],
-            key=lambda p: p[0],
-        )
-        if len(points) < 2:
-            return None
+        now = datetime.now(timezone.utc)
+        current_hour = now.replace(minute=0, second=0, microsecond=0)
+        cutoff = now - timedelta(hours=24)
 
-        points = filter_level_spikes(points)
-        total = sum(
-            max(0.0, points[i][1] - points[i + 1][1])
-            for i in range(len(points) - 1)
-        )
-        return round(total, 1)
+        values = [val for ts, val in water_usage.items() if cutoff <= ts < current_hour]
+        return round(sum(values), 1) if values else None
 
 
 class BoumWaterPumpedSensor(CoordinatorEntity, SensorEntity):
@@ -362,12 +354,12 @@ class BoumDaysRemainingSensor(CoordinatorEntity, SensorEntity):
         self._attr_device_info = _device_info(device_id, _device_name(coordinator, device_id))
 
     def _daily_totals(self, device_data: dict) -> dict[date, float]:
-        """Calculate daily water usage from tank level drops over the last 3 complete days.
+        """Sum hourly water usage per day over the last 3 complete days, from HA statistics.
 
         All complete days in the window are pre-seeded with 0.0 so that days
         with no irrigation are counted in the average denominator.
         """
-        water_level = device_data.get("hass_stats", {}).get("water_level", {})
+        water_usage = device_data.get("hass_stats", {}).get("water_usage", {})
         now = datetime.now(timezone.utc)
         current_hour = now.replace(minute=0, second=0, microsecond=0)
         today_utc = now.date()
@@ -381,15 +373,11 @@ class BoumDaysRemainingSensor(CoordinatorEntity, SensorEntity):
             totals[d] = 0.0
             d += timedelta(days=1)
 
-        points = sorted(
-            [(ts, val) for ts, val in water_level.items() if cutoff <= ts < current_hour],
-            key=lambda p: p[0],
-        )
-        points = filter_level_spikes(points)
-        for i in range(len(points) - 1):
-            drop = points[i][1] - points[i + 1][1]
-            if drop > 0 and points[i][0].date() in totals:
-                totals[points[i][0].date()] += drop
+        for ts, val in water_usage.items():
+            if ts < cutoff or ts >= current_hour or ts.date() >= today_utc:
+                continue
+            if ts.date() in totals:
+                totals[ts.date()] += val
         return totals
 
     @property
