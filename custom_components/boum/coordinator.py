@@ -49,6 +49,35 @@ def _to_datetime(ts) -> datetime | None:
     return None
 
 
+def filter_level_spikes(
+    points: list[tuple[datetime, float]],
+    min_drop: float = 3.0,
+) -> list[tuple[datetime, float]]:
+    """Replace spike readings caused by the ultrasonic sensor seeing the open lid.
+
+    A spike is detected when the level drops by at least *min_drop* litres AND the
+    next reading recovers by at least 50 % of that drop.  The spike value is
+    replaced with the average of its two neighbours so that drop-based consumption
+    calculations ignore the artefact.  Handles single-hour spikes only; multi-hour
+    lid-open periods are covered by the per-minute IQR filter in statistics.py.
+    """
+    if len(points) < 3:
+        return points
+    result = [points[0]]
+    for i in range(1, len(points) - 1):
+        prev_val = result[-1][1]
+        curr_ts, curr_val = points[i]
+        next_val = points[i + 1][1]
+        drop = prev_val - curr_val
+        recovery = next_val - curr_val
+        if drop >= min_drop and recovery >= drop * 0.5:
+            result.append((curr_ts, (prev_val + next_val) / 2))
+        else:
+            result.append(points[i])
+    result.append(points[-1])
+    return result
+
+
 def _latest_level(device_data: dict, tank_type: str, device_model: str) -> float | None:
     """Return current water level in litres from coordinator device data."""
     for data_key in ("minutely", "hourly"):
@@ -112,8 +141,8 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
 
                 # Incremental hourly fetch: only since the last known stat timestamp.
                 # Falls back to a full backfill window on first install.
-                if hass_stats.get("hourly_consumption"):
-                    last_stat_ts = max(hass_stats["hourly_consumption"].keys())
+                if hass_stats.get("water_level"):
+                    last_stat_ts = max(hass_stats["water_level"].keys())
                     hourly_start = last_stat_ts - timedelta(hours=1)
                 else:
                     hourly_start = now - timedelta(days=STATISTICS_BACKFILL_DAYS)
@@ -174,7 +203,7 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
         returned data drives the incremental API fetch window.
         """
         short_id = device_id[:8]
-        consumption_id = f"{DOMAIN}:{short_id}_hourly_consumption"
+        water_pumped_id = f"{DOMAIN}:{short_id}_water_pumped"
         water_level_id = f"{DOMAIN}:{short_id}_water_level"
         start = datetime.now(timezone.utc) - timedelta(hours=SENSOR_STATS_HOURS)
 
@@ -187,7 +216,7 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
                 self.hass,
                 start,
                 None,
-                {consumption_id, water_level_id},
+                {water_pumped_id, water_level_id},
                 "hour",
                 None,
                 {"mean"},
@@ -204,7 +233,7 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
                 return out
 
             return {
-                "hourly_consumption": _extract(consumption_id),
+                "water_pumped": _extract(water_pumped_id),
                 "water_level": _extract(water_level_id),
             }
         except Exception as err:  # noqa: BLE001
@@ -349,9 +378,9 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
         return days
 
     async def _async_get_daily_consumption(self, device_id: str) -> dict[date, float]:
-        """Return daily consumption totals (L) from HA recorder statistics."""
+        """Return daily water consumption (L) from tank level drops in HA statistics."""
         short_id = device_id[:8]
-        stat_id = f"{DOMAIN}:{short_id}_hourly_consumption"
+        stat_id = f"{DOMAIN}:{short_id}_water_level"
         start = datetime.now(timezone.utc) - timedelta(days=30)
 
         from homeassistant.components.recorder import get_instance
@@ -368,12 +397,20 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
             {"mean"},
         )
 
-        daily: defaultdict[date, float] = defaultdict(float)
+        rows: list[tuple[datetime, float]] = []
         for row in stats.get(stat_id, []):
             mean = row.get("mean") if isinstance(row, dict) else row.mean
             ts = _to_datetime(row.get("start") if isinstance(row, dict) else row.start)
             if mean is not None and ts is not None:
-                daily[ts.date()] += mean
+                rows.append((ts, mean))
+        rows.sort(key=lambda x: x[0])
+        rows = filter_level_spikes(rows)
+
+        daily: defaultdict[date, float] = defaultdict(float)
+        for i in range(len(rows) - 1):
+            drop = rows[i][1] - rows[i + 1][1]
+            if drop > 0:
+                daily[rows[i][0].date()] += drop
         return dict(daily)
 
     async def _async_get_daily_temps(self) -> dict[date, float]:

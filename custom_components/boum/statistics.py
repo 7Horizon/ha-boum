@@ -18,8 +18,8 @@ _LOGGER = logging.getLogger(__name__)
 # (api_key, statistic_id_suffix, display_name, unit, optional_transform)
 # The water_level transform is overridden at call-time with the tank-specific formula.
 _STAT_FIELDS: tuple[tuple[str, str, str, str, Callable[[float], float] | None], ...] = (
-    ("flowRate",        "flow_rate",          "Flow Rate",          "L/min",  None),
-    ("flowRate",        "hourly_consumption",  "Hourly Consumption", "L/h",    lambda x: x * 60.0),
+    ("flowRate",        "flow_rate",           "Flow Rate",          "L/min",  None),
+    ("flowRate",        "water_pumped",        "Water Pumped",       "L/h",    lambda x: x * 60.0),
     ("waterTableRange", "water_level",         "Water Level",        "L",      None),  # overridden below
     ("temperature",     "temperature",         "Temperature",        "°C",     None),
     ("temperatureEsp",  "temperature_esp",     "ESP Temperature",    "°C",     None),
@@ -30,6 +30,20 @@ _STAT_FIELDS: tuple[tuple[str, str, str, str, Callable[[float], float] | None], 
     ("inputCurrent",    "input_current",       "Input Current",      "A",      None),
     ("wifiStrength",    "wifi_strength",       "Wi-Fi Strength",     "dBm",    None),
 )
+
+
+def _iqr_filter_low(vals: list[float]) -> list[float]:
+    """Remove low outliers via IQR method — catches lid-open sensor artefacts.
+
+    Only applied when ≥ 5 readings are in a bucket so the quartiles are meaningful.
+    Falls back to the original list if filtering would remove too many values.
+    """
+    s = sorted(vals)
+    n = len(s)
+    q1, q3 = s[n // 4], s[3 * n // 4]
+    fence = q1 - 1.5 * (q3 - q1)
+    filtered = [v for v in vals if v >= fence]
+    return filtered if len(filtered) >= n // 2 else vals
 
 
 def _parse_point(point: dict) -> tuple[datetime | None, float | None]:
@@ -50,6 +64,8 @@ def _build_hourly_stats(
     series: list[dict],
     StatisticData,
     transform: Callable[[float], float] | None,
+    *,
+    filter_low_outliers: bool = False,
 ) -> list:
     """Aggregate {x, y} API points into hourly mean/min/max StatisticData objects."""
     buckets: dict[datetime, list[float]] = defaultdict(list)
@@ -62,15 +78,19 @@ def _build_hourly_stats(
         hour = ts.replace(minute=0, second=0, microsecond=0)
         buckets[hour].append(val)
 
-    return [
-        StatisticData(
-            start=hour,
-            mean=sum(vals) / len(vals),
-            min=min(vals),
-            max=max(vals),
+    result = []
+    for hour, vals in sorted(buckets.items()):
+        if filter_low_outliers and len(vals) >= 5:
+            vals = _iqr_filter_low(vals)
+        result.append(
+            StatisticData(
+                start=hour,
+                mean=sum(vals) / len(vals),
+                min=min(vals),
+                max=max(vals),
+            )
         )
-        for hour, vals in sorted(buckets.items())
-    ]
+    return result
 
 
 def import_statistics(
@@ -131,7 +151,12 @@ def import_statistics(
         if not series:
             _LOGGER.debug("No %s data for device %s, skipping statistic", api_key, short_id)
             continue
-        stats = _build_hourly_stats(series, StatisticData, effective_transform)
+        stats = _build_hourly_stats(
+            series,
+            StatisticData,
+            effective_transform,
+            filter_low_outliers=(id_suffix == "water_level"),
+        )
         if not stats:
             continue
         meta = StatisticMetaData(

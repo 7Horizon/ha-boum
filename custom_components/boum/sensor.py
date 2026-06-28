@@ -26,7 +26,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .coordinator import BoumCoordinator
+from .coordinator import BoumCoordinator, filter_level_spikes
 from .tank import water_level_liters
 
 _LOGGER = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ class BoumSensorEntityDescription(SensorEntityDescription):
 # Telemetry sensors that map 1-to-1 to API fields (no unit conversion needed).
 # flow_rate is intentionally excluded: with 15-min polling the pump is always
 # off at poll time, so the entity is always 0. Flow data lives in HA statistics
-# (boum:xxxx_flow_rate / boum:xxxx_hourly_consumption) via the hourly import.
+# (boum:xxxx_flow_rate / boum:xxxx_water_pumped) via the hourly import.
 SENSOR_DESCRIPTIONS: tuple[BoumSensorEntityDescription, ...] = (
     BoumSensorEntityDescription(
         key="temperature",
@@ -138,8 +138,8 @@ async def async_setup_entry(
             BoumSensor(coordinator, device_id, desc) for desc in SENSOR_DESCRIPTIONS
         )
         entities.append(BoumLastIrrigationSensor(coordinator, device_id))
-        entities.append(BoumDailyConsumptionSensor(coordinator, device_id))
-        entities.append(BoumTankLossSensor(coordinator, device_id))
+        entities.append(BoumDailyWaterUsageSensor(coordinator, device_id))
+        entities.append(BoumWaterPumpedSensor(coordinator, device_id))
         entities.append(BoumDaysRemainingSensor(coordinator, device_id))
         entities.append(BoumWaterForecastSensor(coordinator, device_id))
     async_add_entities(entities)
@@ -266,11 +266,11 @@ class BoumLastIrrigationSensor(CoordinatorEntity, SensorEntity):
         return self.coordinator.data.get(self._device_id, {}).get("last_irrigation")
 
 
-class BoumDailyConsumptionSensor(CoordinatorEntity, SensorEntity):
-    """Water consumed in the last 24 complete hours, read from HA statistics."""
+class BoumDailyWaterUsageSensor(CoordinatorEntity, SensorEntity):
+    """Actual water used (tank level drop) over the last 24 hours, from HA statistics."""
 
     _attr_has_entity_name = True
-    _attr_translation_key = "daily_consumption"
+    _attr_translation_key = "daily_water_usage"
     _attr_native_unit_of_measurement = UnitOfVolume.LITERS
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:water-circle"
@@ -278,44 +278,7 @@ class BoumDailyConsumptionSensor(CoordinatorEntity, SensorEntity):
     def __init__(self, coordinator: BoumCoordinator, device_id: str) -> None:
         super().__init__(coordinator)
         self._device_id = device_id
-        self._attr_unique_id = f"{DOMAIN}_{device_id}_daily_consumption"
-        self._attr_device_info = _device_info(device_id, _device_name(coordinator, device_id))
-
-    @property
-    def native_value(self) -> float | None:
-        hourly_consumption = (
-            self.coordinator.data
-            .get(self._device_id, {})
-            .get("hass_stats", {})
-            .get("hourly_consumption", {})
-        )
-        if not hourly_consumption:
-            return None
-
-        now = datetime.now(timezone.utc)
-        current_hour = now.replace(minute=0, second=0, microsecond=0)
-        cutoff = now - timedelta(hours=24)
-
-        values = [
-            val for ts, val in hourly_consumption.items()
-            if cutoff <= ts < current_hour
-        ]
-        return round(sum(values), 1) if values else None
-
-
-class BoumTankLossSensor(CoordinatorEntity, SensorEntity):
-    """Cumulative water loss over the last 24 hours, read from HA statistics."""
-
-    _attr_has_entity_name = True
-    _attr_translation_key = "tank_loss_24h"
-    _attr_native_unit_of_measurement = UnitOfVolume.LITERS
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:water-minus"
-
-    def __init__(self, coordinator: BoumCoordinator, device_id: str) -> None:
-        super().__init__(coordinator)
-        self._device_id = device_id
-        self._attr_unique_id = f"{DOMAIN}_{device_id}_tank_loss_24h"
+        self._attr_unique_id = f"{DOMAIN}_{device_id}_daily_water_usage"
         self._attr_device_info = _device_info(device_id, _device_name(coordinator, device_id))
 
     @property
@@ -337,11 +300,49 @@ class BoumTankLossSensor(CoordinatorEntity, SensorEntity):
         if len(points) < 2:
             return None
 
-        total_loss = sum(
+        points = filter_level_spikes(points)
+        total = sum(
             max(0.0, points[i][1] - points[i + 1][1])
             for i in range(len(points) - 1)
         )
-        return round(total_loss, 1)
+        return round(total, 1)
+
+
+class BoumWaterPumpedSensor(CoordinatorEntity, SensorEntity):
+    """Water delivered by the pump in the last 24 hours, from HA statistics."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "water_pumped"
+    _attr_native_unit_of_measurement = UnitOfVolume.LITERS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:pump"
+
+    def __init__(self, coordinator: BoumCoordinator, device_id: str) -> None:
+        super().__init__(coordinator)
+        self._device_id = device_id
+        self._attr_unique_id = f"{DOMAIN}_{device_id}_water_pumped"
+        self._attr_device_info = _device_info(device_id, _device_name(coordinator, device_id))
+
+    @property
+    def native_value(self) -> float | None:
+        water_pumped = (
+            self.coordinator.data
+            .get(self._device_id, {})
+            .get("hass_stats", {})
+            .get("water_pumped", {})
+        )
+        if not water_pumped:
+            return None
+
+        now = datetime.now(timezone.utc)
+        current_hour = now.replace(minute=0, second=0, microsecond=0)
+        cutoff = now - timedelta(hours=24)
+
+        values = [
+            val for ts, val in water_pumped.items()
+            if cutoff <= ts < current_hour
+        ]
+        return round(sum(values), 1) if values else None
 
 
 class BoumDaysRemainingSensor(CoordinatorEntity, SensorEntity):
@@ -361,12 +362,12 @@ class BoumDaysRemainingSensor(CoordinatorEntity, SensorEntity):
         self._attr_device_info = _device_info(device_id, _device_name(coordinator, device_id))
 
     def _daily_totals(self, device_data: dict) -> dict[date, float]:
-        """Sum hourly consumption per day over the last 3 complete days, from HA statistics.
+        """Calculate daily water usage from tank level drops over the last 3 complete days.
 
         All complete days in the window are pre-seeded with 0.0 so that days
         with no irrigation are counted in the average denominator.
         """
-        hourly_consumption = device_data.get("hass_stats", {}).get("hourly_consumption", {})
+        water_level = device_data.get("hass_stats", {}).get("water_level", {})
         now = datetime.now(timezone.utc)
         current_hour = now.replace(minute=0, second=0, microsecond=0)
         today_utc = now.date()
@@ -380,11 +381,15 @@ class BoumDaysRemainingSensor(CoordinatorEntity, SensorEntity):
             totals[d] = 0.0
             d += timedelta(days=1)
 
-        for ts, val in hourly_consumption.items():
-            if ts < cutoff or ts >= current_hour or ts.date() >= today_utc:
-                continue
-            if ts.date() in totals:
-                totals[ts.date()] += val  # already L/h = L per hour
+        points = sorted(
+            [(ts, val) for ts, val in water_level.items() if cutoff <= ts < current_hour],
+            key=lambda p: p[0],
+        )
+        points = filter_level_spikes(points)
+        for i in range(len(points) - 1):
+            drop = points[i][1] - points[i + 1][1]
+            if drop > 0 and points[i][0].date() in totals:
+                totals[points[i][0].date()] += drop
         return totals
 
     @property
@@ -407,7 +412,7 @@ class BoumDaysRemainingSensor(CoordinatorEntity, SensorEntity):
         daily = self._daily_totals(device_data)
         avg = sum(daily.values()) / len(daily) if daily else None
         return {
-            "avg_daily_consumption_liters": round(avg, 2) if avg is not None else None,
+            "avg_daily_water_usage_liters": round(avg, 2) if avg is not None else None,
             "days_in_window": len(daily),
             "days_with_consumption": sum(1 for v in daily.values() if v > 0),
         }

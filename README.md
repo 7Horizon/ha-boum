@@ -63,21 +63,24 @@ Data source: per-minute API data (`interval=60s`), last 2 hours.
 
 ---
 
-### Daily Consumption
+### Daily Water Usage
 **Unit:** L
 
-Total water pumped by the irrigation system in the last 24 completed hours. Summed from hourly consumption values stored in HA long-term statistics (`boum:<id>_hourly_consumption`). The current (still-running) hour is excluded to avoid a fluctuating value.
+Actual water consumed from the tank over the last 24 hours. Calculated from the hourly water level values stored in HA long-term statistics (`boum:<id>_water_level`) by summing all consecutive level drops. Level increases (refills, sensor noise) are ignored. This reflects the true water volume that left the tank, including evaporation and leakage, not just what the pump delivered.
+
+Two outlier filters are applied to prevent the ultrasonic sensor from reporting false consumption when the controller lid is opened:
+
+- **IQR filter (import)** — applied per-minute before the hourly mean is written to HA statistics. Per-minute readings that are statistical outliers (IQR method) within the same hour are excluded from the average.
+- **Spike-and-recovery filter (calculation)** — applied to already-stored hourly statistics. A reading is classified as a spike and replaced with the average of its neighbours when the level drops by ≥ 3 L *and* recovers by ≥ 50 % of that drop in the very next hour.
 
 Data source: HA long-term statistics.
 
 ---
 
-### Water Loss (24h)
+### Water Pumped
 **Unit:** L
 
-Cumulative decrease in tank level over the last 24 hours. Calculated from the hourly water level values stored in HA long-term statistics (`boum:<id>_water_level`) by summing all consecutive drops. Level increases (refills, sensor noise) are ignored.
-
-This sensor measures actual water leaving the tank, while *Daily Consumption* measures what the pump delivered. In normal operation both values should be similar.
+Total water delivered by the irrigation pump in the last 24 hours. Derived from the flow rate recorded in HA long-term statistics (`boum:<id>_water_pumped`). The current (still-running) hour is excluded to avoid a fluctuating value.
 
 Data source: HA long-term statistics.
 
@@ -95,18 +98,18 @@ Data source: HA long-term statistics (hourly precision).
 ### Days Remaining
 **Unit:** days
 
-Estimated days until the tank is empty, based on the average daily consumption of the **last 3 complete days**.
+Estimated days until the tank is empty, based on the average daily water usage of the **last 3 complete days**.
 
 ```
-days_remaining = current_level / avg_daily_consumption
+days_remaining = current_level / avg_daily_water_usage
 ```
 
-All days in the 3-day window are included in the average — including days with zero irrigation — so that non-irrigation days correctly reduce the average and give a more accurate estimate. Today and the current hour are excluded from the calculation.
+All days in the 3-day window are included in the average — including days with zero usage — so that non-irrigation days correctly reduce the average and give a more accurate estimate. Today and the current hour are excluded from the calculation.
 
 Extra attributes:
-- `avg_daily_consumption_liters` — the daily average used in the calculation
+- `avg_daily_water_usage_liters` — the daily average water usage used in the calculation
 - `days_in_window` — number of days in the averaging window (denominator)
-- `days_with_consumption` — how many of those days had actual irrigation
+- `days_with_consumption` — how many of those days had actual water usage
 
 Data source: HA long-term statistics.
 
@@ -119,7 +122,7 @@ Weather-aware prediction of how many days the tank will last. Combines historica
 
 **How it works:**
 
-1. **Training data** — Daily consumption totals (from HA long-term statistics) and daily average temperatures (from weather entity state history) for the last 30 days are paired to form training examples.
+1. **Training data** — Daily water usage totals (from tank level drops in HA long-term statistics) and daily average temperatures (from weather entity state history) for the last 30 days are paired to form training examples.
 
 2. **Model fitting** — A linear regression is fitted: `consumption = a × avg_temp + b`. Requires at least 3 days of paired data. If less data is available, a physics-based heuristic is used instead: `max(0, 0.12 × (avg_temp − 15))`, assuming evapotranspiration grows above 15 °C.
 
@@ -170,7 +173,7 @@ The integration writes the following external statistics into the HA recorder (h
 | Statistic ID | Unit | Description |
 |---|---|---|
 | `boum:<id>_flow_rate` | L/min | Hourly average flow rate |
-| `boum:<id>_hourly_consumption` | L/h | Water consumed per hour |
+| `boum:<id>_water_pumped` | L/h | Water delivered by the pump per hour |
 | `boum:<id>_water_level` | L | Tank water level |
 | `boum:<id>_temperature` | °C | Environment temperature |
 | `boum:<id>_temperature_esp` | °C | Controller temperature |
@@ -193,7 +196,7 @@ The coordinator polls the Boum API every **15 minutes**. Four requests are made 
 - **Per-minute data** (`interval=60s`, last 2 hours) — current sensor values (water level, temperature, battery, etc.)
 - **Hourly data** (`interval=3600s`, incremental) — only data since the last known statistic is fetched and written to HA long-term statistics. On first install this backfills 7 days of history; on subsequent polls it typically covers 1–2 hours.
 
-Consumption, tank loss, days remaining, and last irrigation are all calculated from HA long-term statistics rather than from the API, keeping API traffic minimal.
+Water usage, days remaining, and last irrigation are all calculated from HA long-term statistics rather than from the API, keeping API traffic minimal.
 
 ---
 
@@ -201,4 +204,5 @@ Consumption, tank loss, days remaining, and last irrigation are all calculated f
 
 - The Boum API does not expose the device model (Boum 2 / Boum 3 / Boum Core) or tank size. You must configure these manually during setup; otherwise the water level calculation will be inaccurate.
 - The flow rate entity sensor is intentionally not included. With 15-minute polling intervals and typical pump runs lasting only a few minutes, the sensor would always read 0. Flow data is available via the HA long-term statistics described above.
+- Lifting the controller lid during operation can cause the ultrasonic sensor to report an unrealistically low water level. The integration filters these artefacts on two levels (see Daily Water Usage above) so they do not affect consumption or forecast calculations.
 - This is an unofficial integration and is not affiliated with or endorsed by Boum.

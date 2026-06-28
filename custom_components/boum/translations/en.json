@@ -49,9 +49,9 @@
       "solar_voltage":    { "name": "Solar Voltage" },
       "input_current":    { "name": "Input Current" },
       "wifi_strength":    { "name": "Wi-Fi Signal" },
-      "daily_consumption":{ "name": "Daily Consumption" },
-      "tank_loss_24h":    { "name": "Water Loss (24h)" },
-      "last_irrigation":  { "name": "Last Irrigation" },
+      "daily_water_usage": { "name": "Daily Water Usage" },
+      "water_pumped":      { "name": "Water Pumped" },
+      "last_irrigation":   { "name": "Last Irrigation" },
       "days_remaining":   { "name": "Days Remaining" },
       "days_until_empty": { "name": "Days Remaining (Forecast)" }
     }
