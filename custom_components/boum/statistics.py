@@ -142,13 +142,15 @@ def import_water_usage_statistics(
     short_id = device_id[:8]
     stat_id = f"{DOMAIN}:{short_id}_water_usage"
 
-    stat_data = [
-        StatisticData(start=hour, mean=val, min=val, max=val)
-        for hour, val in sorted(usage_by_hour.items())
-    ]
+    running_sum = 0.0
+    stat_data = []
+    for hour, val in sorted(usage_by_hour.items()):
+        running_sum += val
+        stat_data.append(StatisticData(start=hour, mean=val, min=val, max=val, sum=running_sum))
+
     meta = StatisticMetaData(
         **mean_kwargs,
-        has_sum=False,
+        has_sum=True,
         name=f"Boum {short_id} Water Usage",
         source=DOMAIN,
         statistic_id=stat_id,
