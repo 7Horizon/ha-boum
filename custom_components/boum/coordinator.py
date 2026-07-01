@@ -68,15 +68,17 @@ def _compute_hourly_usage(
 
 def filter_level_spikes(
     points: list[tuple[datetime, float]],
-    min_drop: float = 3.0,
+    min_drop: float = 1.0,
 ) -> list[tuple[datetime, float]]:
     """Replace spike readings caused by the ultrasonic sensor seeing the open lid.
 
     A spike is detected when the level drops by at least *min_drop* litres AND the
     next reading recovers by at least 50 % of that drop.  The spike value is
     replaced with the average of its two neighbours so that drop-based consumption
-    calculations ignore the artefact.  Handles single-hour spikes only; multi-hour
-    lid-open periods are covered by the per-minute IQR filter in statistics.py.
+    calculations ignore the artefact.  The recovery condition makes this safe: real
+    consumption (pump cycles) does not recover, so genuine usage is never removed.
+    Handles single-hour spikes only; multi-hour lid-open periods are covered by the
+    per-minute IQR filter in statistics.py.
     """
     if len(points) < 3:
         return points
