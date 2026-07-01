@@ -49,7 +49,7 @@
       "solar_voltage":    { "name": "Solarspannung" },
       "input_current":    { "name": "Eingangsstrom" },
       "wifi_strength":    { "name": "WLAN-Signal" },
-      "daily_water_usage": { "name": "Tagesverbrauch" },
+      "water_usage":       { "name": "Wasserverbrauch" },
       "water_pumped":      { "name": "Gepumptes Wasser" },
       "last_irrigation":   { "name": "Letzte Bewässerung" },
       "days_remaining":   { "name": "Wasser reicht noch" },

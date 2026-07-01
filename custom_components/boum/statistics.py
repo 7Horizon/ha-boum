@@ -18,8 +18,6 @@ _LOGGER = logging.getLogger(__name__)
 # (api_key, statistic_id_suffix, display_name, unit, optional_transform)
 # The water_level transform is overridden at call-time with the tank-specific formula.
 _STAT_FIELDS: tuple[tuple[str, str, str, str, Callable[[float], float] | None], ...] = (
-    ("flowRate",        "flow_rate",           "Flow Rate",          "L/min",  None),
-    ("flowRate",        "water_pumped",        "Water Pumped",       "L/h",    lambda x: x * 60.0),
     ("waterTableRange", "water_level",         "Water Level",        "L",      None),  # overridden below
     ("temperature",     "temperature",         "Temperature",        "°C",     None),
     ("temperatureEsp",  "temperature_esp",     "ESP Temperature",    "°C",     None),
@@ -93,17 +91,20 @@ def _build_hourly_stats(
     return result
 
 
-def import_water_usage_statistics(
+def _write_summing_stat(
     hass: HomeAssistant,
-    device_id: str,
-    usage_by_hour: dict,
+    stat_id: str,
+    name: str,
+    data_by_hour: dict,
+    unit: str = "L",
 ) -> None:
-    """Write pre-computed hourly water usage (L) to HA long-term statistics.
+    """Write hourly summing statistics to the HA recorder.
 
-    usage_by_hour maps hour-start datetime → litres consumed that hour (≥ 0).
-    Hours with zero consumption are included so charts show a clean baseline.
+    Each entry carries mean=val, min=val, max=val and a cumulative sum so the
+    HA statistics card can show both instantaneous and total (Sum) views.
+    data_by_hour maps hour-start datetime → value for that hour (≥ 0).
     """
-    if not usage_by_hour:
+    if not data_by_hour:
         return
 
     try:
@@ -114,13 +115,13 @@ def import_water_usage_statistics(
         _LOGGER.warning("homeassistant.components.recorder.statistics not found; skipping")
         return
 
+    import importlib
     StatisticData = StatisticMetaData = None
     for mod in (
         "homeassistant.components.recorder.statistics",
         "homeassistant.components.recorder.models",
     ):
         try:
-            import importlib
             m = importlib.import_module(mod)
             StatisticData = getattr(m, "StatisticData", None)
             StatisticMetaData = getattr(m, "StatisticMetaData", None)
@@ -130,7 +131,7 @@ def import_water_usage_statistics(
             continue
 
     if StatisticData is None or StatisticMetaData is None:
-        _LOGGER.warning("StatisticData/StatisticMetaData not found; skipping water usage import")
+        _LOGGER.warning("StatisticData/StatisticMetaData not found; skipping %s", stat_id)
         return
 
     try:
@@ -139,25 +140,60 @@ def import_water_usage_statistics(
     except ImportError:
         mean_kwargs = {"has_mean": True}
 
-    short_id = device_id[:8]
-    stat_id = f"{DOMAIN}:{short_id}_water_usage"
-
     running_sum = 0.0
     stat_data = []
-    for hour, val in sorted(usage_by_hour.items()):
+    for hour, val in sorted(data_by_hour.items()):
         running_sum += val
         stat_data.append(StatisticData(start=hour, mean=val, min=val, max=val, sum=running_sum))
 
     meta = StatisticMetaData(
         **mean_kwargs,
         has_sum=True,
-        name=f"Boum {short_id} Water Usage",
+        name=name,
         source=DOMAIN,
         statistic_id=stat_id,
-        unit_of_measurement="L",
+        unit_of_measurement=unit,
     )
     async_add_external_statistics(hass, meta, stat_data)
-    _LOGGER.debug("Imported %d water usage buckets for %s", len(stat_data), short_id)
+    _LOGGER.debug("Imported %d buckets → %s", len(stat_data), stat_id)
+
+
+def import_water_usage_statistics(
+    hass: HomeAssistant,
+    device_id: str,
+    usage_by_hour: dict,
+) -> None:
+    """Write pre-computed hourly water usage (L) to HA long-term statistics.
+
+    usage_by_hour maps hour-start datetime → litres consumed that hour (≥ 0).
+    Derived from tank level drops with spike filtering applied.
+    """
+    short_id = device_id[:8]
+    _write_summing_stat(
+        hass,
+        stat_id=f"{DOMAIN}:{short_id}_water_usage",
+        name=f"Boum {short_id} Water Usage",
+        data_by_hour=usage_by_hour,
+    )
+
+
+def import_water_pumped_statistics(
+    hass: HomeAssistant,
+    device_id: str,
+    pumped_by_hour: dict,
+) -> None:
+    """Write pre-computed hourly pump volume (L) to HA long-term statistics.
+
+    pumped_by_hour maps hour-start datetime → litres pumped that hour (≥ 0).
+    Derived from pumpStopped log events (payload.totalPumpedVolume), summed per hour.
+    """
+    short_id = device_id[:8]
+    _write_summing_stat(
+        hass,
+        stat_id=f"{DOMAIN}:{short_id}_water_pumped",
+        name=f"Boum {short_id} Water Pumped",
+        data_by_hour=pumped_by_hour,
+    )
 
 
 def import_statistics(

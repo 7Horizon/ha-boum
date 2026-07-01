@@ -22,8 +22,9 @@ from .const import (
     UPDATE_INTERVAL,
     WEATHER_ENTITY,
 )
+from .consumption import calculate_water_pumped_from_log, calculate_water_usage_from_level
 from .prediction import DayForecast, PredictionResult, compute_prediction
-from .statistics import import_statistics, import_water_usage_statistics
+from .statistics import import_statistics, import_water_pumped_statistics, import_water_usage_statistics
 from .tank import water_level_liters
 
 _LOGGER = logging.getLogger(__name__)
@@ -52,20 +53,17 @@ def _to_datetime(ts) -> datetime | None:
 def _compute_hourly_usage(
     water_level: dict[datetime, float],
 ) -> dict[datetime, float]:
-    """Return hourly water consumption (L) derived from consecutive tank level drops.
+    """Return hourly water consumption (L) using the Boum level-based algorithm.
 
-    The spike filter is applied before computing drops so that lid-open artefacts
-    do not produce false consumption entries.  All hours (including 0 L) are
-    returned so that charts show a clean baseline.
+    Applies filter_level_spikes first (lid-open artefacts), then delegates to
+    calculate_water_usage_from_level which mirrors the original Boum app logic:
+    noise gate + per-hour drop accumulation.
     """
     if len(water_level) < 2:
         return {}
     points = sorted(water_level.items(), key=lambda p: p[0])
     points = filter_level_spikes(points)
-    return {
-        points[i][0]: max(0.0, points[i][1] - points[i + 1][1])
-        for i in range(len(points) - 1)
-    }
+    return calculate_water_usage_from_level(points)
 
 
 def filter_level_spikes(
@@ -95,6 +93,22 @@ def filter_level_spikes(
             result.append(points[i])
     result.append(points[-1])
     return result
+
+
+def _last_pump_from_log(log_entries: list[dict]) -> datetime | None:
+    """Return the exact timestamp of the most recent pumpStopped log event."""
+    last: datetime | None = None
+    for entry in log_entries:
+        if entry.get("type") != "pumpStopped":
+            continue
+        raw_ts = entry.get("timestamp", "")
+        try:
+            ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            continue
+        if last is None or ts > last:
+            last = ts
+    return last
 
 
 def _latest_level(device_data: dict, tank_type: str, device_model: str) -> float | None:
@@ -179,7 +193,15 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
                     ),
                 )
 
-                last_irrigation = await self._async_get_last_irrigation(device_id, minutely)
+                device_log = await self.api.get_device_log(device_id)
+
+                # Last irrigation: exact timestamp from pumpStopped log event.
+                # Falls back to water_pumped statistics (60-day window) when
+                # the log window does not cover the most recent pump cycle.
+                last_irrigation = _last_pump_from_log(device_log)
+                if last_irrigation is None:
+                    last_irrigation = await self._async_get_last_irrigation(device_id)
+
                 result[device_id] = {
                     "name": device_name,
                     "state": state,
@@ -200,6 +222,14 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
                     import_water_usage_statistics(self.hass, device_id, usage_by_hour)
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.warning("Water usage statistics import failed for %s: %s", device_id, err)
+
+                try:
+                    pumped_stats = hass_stats.get("water_pumped", {})
+                    since = (max(pumped_stats.keys()) if pumped_stats else None)
+                    pumped_by_hour = calculate_water_pumped_from_log(device_log, since=since)
+                    import_water_pumped_statistics(self.hass, device_id, pumped_by_hour)
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.warning("Water pumped statistics import failed for %s: %s", device_id, err)
             except BoumApiError as err:
                 raise UpdateFailed(
                     f"Error fetching data for device {device_id}: {err}"
@@ -221,11 +251,16 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
     async def _async_get_hourly_stats_for_sensors(
         self, device_id: str
     ) -> dict[str, dict[datetime, float]]:
-        """Fetch hourly consumption and water level from HA statistics.
+        """Fetch water_pumped, water_level, and water_usage from HA statistics.
+
+        Keys in the returned dict:
+          water_pumped — log-based pump volume (stat: water_pumped)
+          water_level  — tank level (stat: water_level)
+          water_usage  — tank level drops, spike-filtered (stat: water_usage)
 
         Returns data for the last SENSOR_STATS_HOURS hours (enough for the
-        3-day average consumption sensor). The most recent timestamp in the
-        returned data drives the incremental API fetch window.
+        3-day average sensor and 24 h daily totals). The most recent water_level
+        timestamp drives the incremental hourly API fetch window.
         """
         short_id = device_id[:8]
         water_pumped_id = f"{DOMAIN}:{short_id}_water_pumped"
@@ -267,16 +302,14 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
             _LOGGER.debug("Could not read HA statistics for sensors: %s", err)
             return {}
 
-    async def _async_get_last_irrigation(
-        self, device_id: str, minutely: dict
-    ) -> datetime | None:
-        """Return last irrigation timestamp.
+    async def _async_get_last_irrigation(self, device_id: str) -> datetime | None:
+        """Return last irrigation timestamp from water_pumped statistics (60-day window).
 
-        Primary source: HA flow_rate statistics (hourly precision, unlimited history).
-        Fallback: minutely API data (used on first install before stats exist).
+        Fallback for when the device log does not cover the most recent pump
+        cycle (log window is typically ~24 h).  Hourly precision only.
         """
         short_id = device_id[:8]
-        stat_id = f"{DOMAIN}:{short_id}_flow_rate"
+        stat_id = f"{DOMAIN}:{short_id}_water_pumped"
         start = datetime.now(timezone.utc) - timedelta(days=60)
 
         try:
@@ -300,27 +333,10 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
                 if mean is not None and mean > 0 and ts is not None:
                     if last is None or ts > last:
                         last = ts
-            if last is not None:
-                return last
+            return last
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Could not read last irrigation from statistics: %s", err)
-
-        # Fallback: scan the short minutely window (covers ~2h; handles first install)
-        last = None
-        for point in minutely.get("timeSeries", {}).get("flowRate", []):
-            try:
-                rate = float(point.get("y") or 0)
-            except (TypeError, ValueError):
-                continue
-            if rate <= 0:
-                continue
-            try:
-                ts = datetime.fromisoformat(point["x"].replace("Z", "+00:00"))
-                if last is None or ts > last:
-                    last = ts
-            except (KeyError, ValueError, AttributeError):
-                continue
-        return last
+            return None
 
     # ------------------------------------------------------------------
     # Forecast helpers
@@ -405,7 +421,7 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
         return days
 
     async def _async_get_daily_consumption(self, device_id: str) -> dict[date, float]:
-        """Return daily water consumption (L) from water_usage HA statistics."""
+        """Return daily water usage (L) from water_usage HA statistics (tank level drops)."""
         short_id = device_id[:8]
         stat_id = f"{DOMAIN}:{short_id}_water_usage"
         start = datetime.now(timezone.utc) - timedelta(days=30)

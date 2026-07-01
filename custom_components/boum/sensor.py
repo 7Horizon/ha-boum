@@ -40,9 +40,9 @@ class BoumSensorEntityDescription(SensorEntityDescription):
 
 
 # Telemetry sensors that map 1-to-1 to API fields (no unit conversion needed).
-# flow_rate is intentionally excluded: with 15-min polling the pump is always
-# off at poll time, so the entity is always 0. Flow data lives in HA statistics
-# (boum:xxxx_flow_rate / boum:xxxx_water_pumped) via the hourly import.
+# Flow rate is intentionally not exposed as a sensor: with 15-min polling the
+# pump is always off at poll time. Pump volume data lives in HA statistics
+# (boum:xxxx_water_pumped), computed from pumpStopped log events.
 SENSOR_DESCRIPTIONS: tuple[BoumSensorEntityDescription, ...] = (
     BoumSensorEntityDescription(
         key="temperature",
@@ -138,7 +138,7 @@ async def async_setup_entry(
             BoumSensor(coordinator, device_id, desc) for desc in SENSOR_DESCRIPTIONS
         )
         entities.append(BoumLastIrrigationSensor(coordinator, device_id))
-        entities.append(BoumDailyWaterUsageSensor(coordinator, device_id))
+        entities.append(BoumWaterUsageSensor(coordinator, device_id))
         entities.append(BoumWaterPumpedSensor(coordinator, device_id))
         entities.append(BoumDaysRemainingSensor(coordinator, device_id))
         entities.append(BoumWaterForecastSensor(coordinator, device_id))
@@ -248,7 +248,7 @@ class BoumSensor(CoordinatorEntity, SensorEntity):
 
 
 class BoumLastIrrigationSensor(CoordinatorEntity, SensorEntity):
-    """Timestamp of the last irrigation event (last minute where flowRate > 0)."""
+    """Timestamp of the last irrigation event from the most recent pumpStopped log entry."""
 
     _attr_has_entity_name = True
     _attr_translation_key = "last_irrigation"
@@ -266,11 +266,16 @@ class BoumLastIrrigationSensor(CoordinatorEntity, SensorEntity):
         return self.coordinator.data.get(self._device_id, {}).get("last_irrigation")
 
 
-class BoumDailyWaterUsageSensor(CoordinatorEntity, SensorEntity):
-    """Actual water used (tank level drop) over the last 24 hours, from HA statistics."""
+class BoumWaterUsageSensor(CoordinatorEntity, SensorEntity):
+    """Water consumed from the tank over the last 24 hours, from HA statistics.
+
+    Derived from tank level drops (boum:<id>_water_usage statistic), spike-filtered.
+    Includes evaporation and leakage — reflects actual tank depletion.
+    Also the basis for Days Remaining and the weather forecast.
+    """
 
     _attr_has_entity_name = True
-    _attr_translation_key = "daily_water_usage"
+    _attr_translation_key = "water_usage"
     _attr_native_unit_of_measurement = UnitOfVolume.LITERS
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:water-circle"
@@ -278,7 +283,7 @@ class BoumDailyWaterUsageSensor(CoordinatorEntity, SensorEntity):
     def __init__(self, coordinator: BoumCoordinator, device_id: str) -> None:
         super().__init__(coordinator)
         self._device_id = device_id
-        self._attr_unique_id = f"{DOMAIN}_{device_id}_daily_water_usage"
+        self._attr_unique_id = f"{DOMAIN}_{device_id}_water_usage"
         self._attr_device_info = _device_info(device_id, _device_name(coordinator, device_id))
 
     @property
@@ -301,7 +306,11 @@ class BoumDailyWaterUsageSensor(CoordinatorEntity, SensorEntity):
 
 
 class BoumWaterPumpedSensor(CoordinatorEntity, SensorEntity):
-    """Water delivered by the pump in the last 24 hours, from HA statistics."""
+    """Water delivered by the pump in the last 24 hours, from HA statistics.
+
+    Derived from pumpStopped log events (payload.totalPumpedVolume) aggregated
+    into the boum:<id>_water_pumped statistic.
+    """
 
     _attr_has_entity_name = True
     _attr_translation_key = "water_pumped"
@@ -330,15 +339,12 @@ class BoumWaterPumpedSensor(CoordinatorEntity, SensorEntity):
         current_hour = now.replace(minute=0, second=0, microsecond=0)
         cutoff = now - timedelta(hours=24)
 
-        values = [
-            val for ts, val in water_pumped.items()
-            if cutoff <= ts < current_hour
-        ]
+        values = [val for ts, val in water_pumped.items() if cutoff <= ts < current_hour]
         return round(sum(values), 1) if values else None
 
 
 class BoumDaysRemainingSensor(CoordinatorEntity, SensorEntity):
-    """Days until empty based on the 3-day average daily consumption."""
+    """Days until empty based on the 3-day average daily water pumped."""
 
     _attr_has_entity_name = True
     _attr_translation_key = "days_remaining"
@@ -354,7 +360,7 @@ class BoumDaysRemainingSensor(CoordinatorEntity, SensorEntity):
         self._attr_device_info = _device_info(device_id, _device_name(coordinator, device_id))
 
     def _daily_totals(self, device_data: dict) -> dict[date, float]:
-        """Sum hourly water usage per day over the last 3 complete days, from HA statistics.
+        """Sum hourly water pumped per day over the last 3 complete days, from HA statistics.
 
         All complete days in the window are pre-seeded with 0.0 so that days
         with no irrigation are counted in the average denominator.

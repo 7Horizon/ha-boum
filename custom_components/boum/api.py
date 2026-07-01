@@ -102,6 +102,15 @@ class BoumApi:
         data = await self._get(f"/devices/{device_id}")
         return data.get("data", {})
 
+    async def get_device_log(self, device_id: str) -> list[dict]:
+        """Return device log entries from the server.
+
+        Relevant entry types: pumpStopped (contains payload.totalPumpedVolume),
+        deepSleep, reset.
+        """
+        data = await self._get(f"/devices/{device_id}/log")
+        return data.get("data", [])
+
     async def get_device_telemetry(
         self, device_id: str, start: datetime, end: datetime, interval: str | None = None
     ) -> dict:
