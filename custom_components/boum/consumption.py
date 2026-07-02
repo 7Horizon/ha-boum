@@ -8,6 +8,7 @@ Two methods are provided:
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterator
 from datetime import datetime
 
 
@@ -57,6 +58,22 @@ def calculate_water_usage_from_level(
     }
 
 
+def iter_pump_events(log_entries: list[dict]) -> Iterator[tuple[datetime, float]]:
+    """Yield (timestamp, volume_l) for every pumpStopped entry in a device log.
+
+    Entries with a missing or unparsable timestamp/volume are skipped.
+    """
+    for entry in log_entries:
+        if entry.get("type") != "pumpStopped":
+            continue
+        try:
+            volume = float(entry["payload.totalPumpedVolume"])
+            ts = datetime.fromisoformat(entry["timestamp"].replace("Z", "+00:00"))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+        yield ts, volume
+
+
 def calculate_water_pumped_from_log(
     log_entries: list[dict],
     *,
@@ -66,7 +83,7 @@ def calculate_water_pumped_from_log(
 
     The device firmware emits a pumpStopped log entry after each pump cycle
     containing the exact measured volume (payload.totalPumpedVolume, in L).
-    This is more accurate than the flow-rate estimate because it accounts for
+    This is more accurate than a flow-rate estimate because it accounts for
     the pump switch-off lag and uses the device's own measurement.
 
     Multiple pump cycles within the same hour are summed into a single bucket.
@@ -80,23 +97,8 @@ def calculate_water_pumped_from_log(
         last known water_pumped stat timestamp to avoid reprocessing old data.
     """
     result: defaultdict[datetime, float] = defaultdict(float)
-    for entry in log_entries:
-        if entry.get("type") != "pumpStopped":
-            continue
-        volume = entry.get("payload.totalPumpedVolume")
-        if volume is None:
-            continue
-        try:
-            volume = float(volume)
-        except (TypeError, ValueError):
-            continue
-        raw_ts = entry.get("timestamp", "")
-        try:
-            ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
-        except (ValueError, AttributeError):
-            continue
+    for ts, volume in iter_pump_events(log_entries):
         if since is not None and ts < since:
             continue
-        hour = ts.replace(minute=0, second=0, microsecond=0)
-        result[hour] += volume
+        result[ts.replace(minute=0, second=0, microsecond=0)] += volume
     return dict(result)

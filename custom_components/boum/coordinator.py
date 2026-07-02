@@ -5,6 +5,9 @@ import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
+from homeassistant.components.recorder import get_instance
+from homeassistant.components.recorder.history import get_significant_states
+from homeassistant.components.recorder.statistics import statistics_during_period
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -22,7 +25,11 @@ from .const import (
     UPDATE_INTERVAL,
     WEATHER_ENTITY,
 )
-from .consumption import calculate_water_pumped_from_log, calculate_water_usage_from_level
+from .consumption import (
+    calculate_water_pumped_from_log,
+    calculate_water_usage_from_level,
+    iter_pump_events,
+)
 from .prediction import DayForecast, PredictionResult, compute_prediction
 from .statistics import import_statistics, import_water_pumped_statistics, import_water_usage_statistics
 from .tank import water_level_liters
@@ -99,34 +106,55 @@ def filter_level_spikes(
 
 def _last_pump_from_log(log_entries: list[dict]) -> datetime | None:
     """Return the exact timestamp of the most recent pumpStopped log event."""
-    last: datetime | None = None
-    for entry in log_entries:
-        if entry.get("type") != "pumpStopped":
+    return max((ts for ts, _ in iter_pump_events(log_entries)), default=None)
+
+
+def latest_value(time_series: dict, key: str) -> float | None:
+    """Return the most recent non-null y value for a timeSeries key."""
+    for point in reversed(time_series.get(key, [])):
+        v = point.get("y")
+        if v is None:
             continue
-        raw_ts = entry.get("timestamp", "")
         try:
-            ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
-        except (ValueError, AttributeError):
+            return float(v)
+        except (TypeError, ValueError):
             continue
-        if last is None or ts > last:
-            last = ts
-    return last
+    return None
 
 
-def _latest_level(device_data: dict, tank_type: str, device_model: str) -> float | None:
+def current_level(device_data: dict, tank_type: str, device_model: str) -> float | None:
     """Return current water level in litres from coordinator device data."""
     for data_key in ("minutely", "hourly"):
-        for point in reversed(
-            device_data.get(data_key, {}).get("timeSeries", {}).get("waterTableRange", [])
-        ):
-            v = point.get("y")
-            if v is None:
-                continue
-            try:
-                return water_level_liters(float(v), tank_type, device_model)
-            except (TypeError, ValueError):
-                continue
+        raw = latest_value(
+            device_data.get(data_key, {}).get("timeSeries", {}), "waterTableRange"
+        )
+        if raw is not None:
+            return water_level_liters(raw, tank_type, device_model)
     return None
+
+
+def _stat_rows(stats: dict, stat_id: str):
+    """Yield (timestamp, mean) pairs from a statistics_during_period result."""
+    for row in stats.get(stat_id, []):
+        mean = row.get("mean") if isinstance(row, dict) else row.mean
+        ts = _to_datetime(row.get("start") if isinstance(row, dict) else row.start)
+        if ts is not None and mean is not None:
+            yield ts, float(mean)
+
+
+def _coerce_float(*candidates: object, default: float) -> float:
+    """Return the first candidate convertible to float; None is skipped.
+
+    Unlike an `or` chain this keeps legitimate zero values (0 °C, 0 mm).
+    """
+    for v in candidates:
+        if v is None:
+            continue
+        try:
+            return float(v)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+    return default
 
 
 class BoumCoordinator(DataUpdateCoordinator[dict]):
@@ -221,7 +249,7 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
 
                 try:
                     usage_by_hour = _compute_hourly_usage(hass_stats.get("water_level", {}))
-                    import_water_usage_statistics(self.hass, device_id, usage_by_hour)
+                    await import_water_usage_statistics(self.hass, device_id, usage_by_hour)
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.warning("Water usage statistics import failed for %s: %s", device_id, err)
 
@@ -229,7 +257,7 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
                     pumped_stats = hass_stats.get("water_pumped", {})
                     since = (max(pumped_stats.keys()) if pumped_stats else None)
                     pumped_by_hour = calculate_water_pumped_from_log(device_log, since=since)
-                    import_water_pumped_statistics(self.hass, device_id, pumped_by_hour)
+                    await import_water_pumped_statistics(self.hass, device_id, pumped_by_hour)
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.warning("Water pumped statistics import failed for %s: %s", device_id, err)
             except BoumApiError as err:
@@ -250,55 +278,41 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
     # HA statistics helpers
     # ------------------------------------------------------------------
 
+    async def _async_stats_during_period(
+        self, start: datetime, stat_ids: set[str]
+    ) -> dict:
+        """Run an hourly mean statistics_during_period query in the executor."""
+        return await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            start,
+            None,
+            stat_ids,
+            "hour",
+            None,
+            {"mean"},
+        )
+
     async def _async_get_hourly_stats_for_sensors(
         self, device_id: str
     ) -> dict[str, dict[datetime, float]]:
         """Fetch water_pumped, water_level, and water_usage from HA statistics.
-
-        Keys in the returned dict:
-          water_pumped — log-based pump volume (stat: water_pumped)
-          water_level  — tank level (stat: water_level)
-          water_usage  — tank level drops, spike-filtered (stat: water_usage)
 
         Returns data for the last SENSOR_STATS_HOURS hours (enough for the
         3-day average sensor and 24 h daily totals). The most recent water_level
         timestamp drives the incremental hourly API fetch window.
         """
         short_id = device_id[:8]
-        water_pumped_id = f"{DOMAIN}:{short_id}_water_pumped"
-        water_level_id = f"{DOMAIN}:{short_id}_water_level"
-        water_usage_id = f"{DOMAIN}:{short_id}_water_usage"
+        keys = ("water_pumped", "water_level", "water_usage")
         start = datetime.now(timezone.utc) - timedelta(hours=SENSOR_STATS_HOURS)
 
         try:
-            from homeassistant.components.recorder import get_instance
-            from homeassistant.components.recorder.statistics import statistics_during_period
-
-            stats = await get_instance(self.hass).async_add_executor_job(
-                statistics_during_period,
-                self.hass,
-                start,
-                None,
-                {water_pumped_id, water_level_id, water_usage_id},
-                "hour",
-                None,
-                {"mean"},
+            stats = await self._async_stats_during_period(
+                start, {f"{DOMAIN}:{short_id}_{key}" for key in keys}
             )
-
-            def _extract(stat_id: str) -> dict[datetime, float]:
-                out: dict[datetime, float] = {}
-                for row in stats.get(stat_id, []):
-                    raw_ts = row.get("start") if isinstance(row, dict) else row.start
-                    mean = row.get("mean") if isinstance(row, dict) else row.mean
-                    ts = _to_datetime(raw_ts)
-                    if ts is not None and mean is not None:
-                        out[ts] = mean
-                return out
-
             return {
-                "water_pumped": _extract(water_pumped_id),
-                "water_level": _extract(water_level_id),
-                "water_usage": _extract(water_usage_id),
+                key: dict(_stat_rows(stats, f"{DOMAIN}:{short_id}_{key}"))
+                for key in keys
             }
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Could not read HA statistics for sensors: %s", err)
@@ -310,32 +324,15 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
         Fallback for when the device log does not cover the most recent pump
         cycle (log window is typically ~24 h).  Hourly precision only.
         """
-        short_id = device_id[:8]
-        stat_id = f"{DOMAIN}:{short_id}_water_pumped"
+        stat_id = f"{DOMAIN}:{device_id[:8]}_water_pumped"
         start = datetime.now(timezone.utc) - timedelta(days=60)
 
         try:
-            from homeassistant.components.recorder import get_instance
-            from homeassistant.components.recorder.statistics import statistics_during_period
-
-            stats = await get_instance(self.hass).async_add_executor_job(
-                statistics_during_period,
-                self.hass,
-                start,
-                None,
-                {stat_id},
-                "hour",
-                None,
-                {"mean"},
+            stats = await self._async_stats_during_period(start, {stat_id})
+            return max(
+                (ts for ts, mean in _stat_rows(stats, stat_id) if mean > 0),
+                default=None,
             )
-            last: datetime | None = None
-            for row in stats.get(stat_id, []):
-                mean = row.get("mean") if isinstance(row, dict) else row.mean
-                ts = _to_datetime(row.get("start") if isinstance(row, dict) else row.start)
-                if mean is not None and mean > 0 and ts is not None:
-                    if last is None or ts > last:
-                        last = ts
-            return last
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Could not read last irrigation from statistics: %s", err)
             return None
@@ -357,8 +354,8 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
 
         results: dict[str, PredictionResult] = {}
         for device_id, data in device_data.items():
-            current_level = _latest_level(data, self.tank_type, self.device_model)
-            if current_level is None:
+            level = current_level(data, self.tank_type, self.device_model)
+            if level is None:
                 continue
             try:
                 daily_consumption = await self._async_get_daily_consumption(device_id)
@@ -374,7 +371,7 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
                 if day in daily_temps
             ]
             results[device_id] = compute_prediction(
-                current_level, forecast_days, training_pairs
+                level, forecast_days, training_pairs
             )
             _LOGGER.debug(
                 "Forecast for %s: %s days until empty (trained on %d days)",
@@ -406,47 +403,31 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
         for f in forecast_list[:7]:
             try:
                 dt = datetime.fromisoformat(str(f["datetime"])).date()
-                days.append(
-                    DayForecast(
-                        date=dt,
-                        temp_high=float(
-                            f.get("temperature") or f.get("native_temperature") or 20
-                        ),
-                        temp_low=float(
-                            f.get("templow") or f.get("native_templow") or 10
-                        ),
-                        precipitation_mm=float(f.get("precipitation") or 0),
-                    )
-                )
             except (KeyError, TypeError, ValueError):
                 continue
+            days.append(
+                DayForecast(
+                    date=dt,
+                    temp_high=_coerce_float(
+                        f.get("temperature"), f.get("native_temperature"), default=20.0
+                    ),
+                    temp_low=_coerce_float(
+                        f.get("templow"), f.get("native_templow"), default=10.0
+                    ),
+                    precipitation_mm=_coerce_float(f.get("precipitation"), default=0.0),
+                )
+            )
         return days
 
     async def _async_get_daily_consumption(self, device_id: str) -> dict[date, float]:
         """Return daily water usage (L) from water_usage HA statistics (tank level drops)."""
-        short_id = device_id[:8]
-        stat_id = f"{DOMAIN}:{short_id}_water_usage"
+        stat_id = f"{DOMAIN}:{device_id[:8]}_water_usage"
         start = datetime.now(timezone.utc) - timedelta(days=30)
 
-        from homeassistant.components.recorder import get_instance
-        from homeassistant.components.recorder.statistics import statistics_during_period
-
-        stats = await get_instance(self.hass).async_add_executor_job(
-            statistics_during_period,
-            self.hass,
-            start,
-            None,
-            {stat_id},
-            "hour",
-            None,
-            {"mean"},
-        )
-
+        stats = await self._async_stats_during_period(start, {stat_id})
         daily: defaultdict[date, float] = defaultdict(float)
-        for row in stats.get(stat_id, []):
-            mean = row.get("mean") if isinstance(row, dict) else row.mean
-            ts = _to_datetime(row.get("start") if isinstance(row, dict) else row.start)
-            if mean is not None and ts is not None and mean > 0:
+        for ts, mean in _stat_rows(stats, stat_id):
+            if mean > 0:
                 daily[ts.date()] += mean
         return dict(daily)
 
@@ -454,9 +435,6 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
         """Return daily average temperatures from weather entity state history."""
         start = datetime.now(timezone.utc) - timedelta(days=30)
         try:
-            from homeassistant.components.recorder import get_instance
-            from homeassistant.components.recorder.history import get_significant_states
-
             history = await get_instance(self.hass).async_add_executor_job(
                 get_significant_states,
                 self.hass,

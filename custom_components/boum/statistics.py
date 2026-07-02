@@ -4,8 +4,14 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 
+from homeassistant.components.recorder import get_instance
+from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
+from homeassistant.components.recorder.statistics import (
+    async_add_external_statistics,
+    statistics_during_period,
+)
 from homeassistant.core import HomeAssistant
 
 from .const import DEFAULT_DEVICE_MODEL, DEFAULT_TANK_TYPE, DOMAIN
@@ -13,20 +19,28 @@ from .tank import water_level_liters as _tank_wl
 
 _LOGGER = logging.getLogger(__name__)
 
+# StatisticMeanType exists on newer HA cores; older ones use has_mean instead.
+try:
+    from homeassistant.components.recorder.statistics import StatisticMeanType
+
+    _MEAN_KWARGS: dict = {"mean_type": StatisticMeanType.ARITHMETIC}
+except ImportError:
+    _MEAN_KWARGS = {"has_mean": True}
+
 
 # All telemetry fields to import as statistics.
-# (api_key, statistic_id_suffix, display_name, unit, optional_transform)
-# The water_level transform is overridden at call-time with the tank-specific formula.
-_STAT_FIELDS: tuple[tuple[str, str, str, str, Callable[[float], float] | None], ...] = (
-    ("waterTableRange", "water_level",         "Water Level",        "L",      None),  # overridden below
-    ("temperature",     "temperature",         "Temperature",        "°C",     None),
-    ("temperatureEsp",  "temperature_esp",     "ESP Temperature",    "°C",     None),
-    ("batteryCapacity", "battery_capacity",    "Battery Capacity",   "%",      None),
-    ("batteryVoltage",  "battery_voltage",     "Battery Voltage",    "V",      None),
-    ("batteryCurrent",  "battery_current",     "Battery Current",    "A",      None),
-    ("solarVoltage",    "solar_voltage",       "Solar Voltage",      "V",      None),
-    ("inputCurrent",    "input_current",       "Input Current",      "A",      None),
-    ("wifiStrength",    "wifi_strength",       "Wi-Fi Strength",     "dBm",    None),
+# (api_key, statistic_id_suffix, display_name, unit)
+# The water_level series is converted with the tank-specific formula at call time.
+_STAT_FIELDS: tuple[tuple[str, str, str, str], ...] = (
+    ("waterTableRange", "water_level",      "Water Level",      "L"),
+    ("temperature",     "temperature",      "Temperature",      "°C"),
+    ("temperatureEsp",  "temperature_esp",  "ESP Temperature",  "°C"),
+    ("batteryCapacity", "battery_capacity", "Battery Capacity", "%"),
+    ("batteryVoltage",  "battery_voltage",  "Battery Voltage",  "V"),
+    ("batteryCurrent",  "battery_current",  "Battery Current",  "A"),
+    ("solarVoltage",    "solar_voltage",    "Solar Voltage",    "V"),
+    ("inputCurrent",    "input_current",    "Input Current",    "A"),
+    ("wifiStrength",    "wifi_strength",    "Wi-Fi Strength",   "dBm"),
 )
 
 
@@ -60,11 +74,10 @@ def _parse_point(point: dict) -> tuple[datetime | None, float | None]:
 
 def _build_hourly_stats(
     series: list[dict],
-    StatisticData,
     transform: Callable[[float], float] | None,
     *,
     filter_low_outliers: bool = False,
-) -> list:
+) -> list[StatisticData]:
     """Aggregate {x, y} API points into hourly mean/min/max StatisticData objects."""
     buckets: dict[datetime, list[float]] = defaultdict(list)
     for point in series:
@@ -91,7 +104,36 @@ def _build_hourly_stats(
     return result
 
 
-def _write_summing_stat(
+async def _async_last_sum_before(
+    hass: HomeAssistant, stat_id: str, first_hour: datetime
+) -> float:
+    """Return the cumulative sum of the newest statistics row before *first_hour*.
+
+    Summing stats are rewritten in batches (incremental log imports, rolling
+    level windows).  HA renders period totals as differences of the cumulative
+    sum, so each batch must continue where the preceding row left off —
+    restarting at 0 would produce negative changes at every batch boundary.
+    """
+    start = first_hour - timedelta(days=30)
+    end = first_hour - timedelta(seconds=1)
+    stats = await get_instance(hass).async_add_executor_job(
+        statistics_during_period,
+        hass,
+        start,
+        end,
+        {stat_id},
+        "hour",
+        None,
+        {"sum"},
+    )
+    for row in reversed(stats.get(stat_id, [])):
+        s = row.get("sum") if isinstance(row, dict) else row.sum
+        if s is not None:
+            return float(s)
+    return 0.0
+
+
+async def _async_write_summing_stat(
     hass: HomeAssistant,
     stat_id: str,
     name: str,
@@ -107,47 +149,16 @@ def _write_summing_stat(
     if not data_by_hour:
         return
 
-    try:
-        from homeassistant.components.recorder.statistics import (
-            async_add_external_statistics,
-        )
-    except ImportError:
-        _LOGGER.warning("homeassistant.components.recorder.statistics not found; skipping")
-        return
-
-    import importlib
-    StatisticData = StatisticMetaData = None
-    for mod in (
-        "homeassistant.components.recorder.statistics",
-        "homeassistant.components.recorder.models",
-    ):
-        try:
-            m = importlib.import_module(mod)
-            StatisticData = getattr(m, "StatisticData", None)
-            StatisticMetaData = getattr(m, "StatisticMetaData", None)
-            if StatisticData and StatisticMetaData:
-                break
-        except ImportError:
-            continue
-
-    if StatisticData is None or StatisticMetaData is None:
-        _LOGGER.warning("StatisticData/StatisticMetaData not found; skipping %s", stat_id)
-        return
-
-    try:
-        from homeassistant.components.recorder.statistics import StatisticMeanType
-        mean_kwargs: dict = {"mean_type": StatisticMeanType.ARITHMETIC}
-    except ImportError:
-        mean_kwargs = {"has_mean": True}
-
-    running_sum = 0.0
+    running_sum = await _async_last_sum_before(hass, stat_id, min(data_by_hour))
     stat_data = []
     for hour, val in sorted(data_by_hour.items()):
         running_sum += val
-        stat_data.append(StatisticData(start=hour, mean=val, min=val, max=val, sum=running_sum))
+        stat_data.append(
+            StatisticData(start=hour, mean=val, min=val, max=val, sum=running_sum)
+        )
 
     meta = StatisticMetaData(
-        **mean_kwargs,
+        **_MEAN_KWARGS,
         has_sum=True,
         name=name,
         source=DOMAIN,
@@ -158,7 +169,7 @@ def _write_summing_stat(
     _LOGGER.debug("Imported %d buckets → %s", len(stat_data), stat_id)
 
 
-def import_water_usage_statistics(
+async def import_water_usage_statistics(
     hass: HomeAssistant,
     device_id: str,
     usage_by_hour: dict,
@@ -169,7 +180,7 @@ def import_water_usage_statistics(
     Derived from tank level drops with spike filtering applied.
     """
     short_id = device_id[:8]
-    _write_summing_stat(
+    await _async_write_summing_stat(
         hass,
         stat_id=f"{DOMAIN}:{short_id}_water_usage",
         name=f"Boum {short_id} Water Usage",
@@ -177,7 +188,7 @@ def import_water_usage_statistics(
     )
 
 
-def import_water_pumped_statistics(
+async def import_water_pumped_statistics(
     hass: HomeAssistant,
     device_id: str,
     pumped_by_hour: dict,
@@ -188,7 +199,7 @@ def import_water_pumped_statistics(
     Derived from pumpStopped log events (payload.totalPumpedVolume), summed per hour.
     """
     short_id = device_id[:8]
-    _write_summing_stat(
+    await _async_write_summing_stat(
         hass,
         stat_id=f"{DOMAIN}:{short_id}_water_pumped",
         name=f"Boum {short_id} Water Pumped",
@@ -208,62 +219,28 @@ def import_statistics(
     The caller is responsible for passing only the data that needs importing
     (incremental fetch). All points in hourly_telemetry are pushed.
     """
-    try:
-        from homeassistant.components.recorder.statistics import (
-            async_add_external_statistics,
-        )
-    except ImportError:
-        _LOGGER.warning("homeassistant.components.recorder.statistics not found; skipping")
-        return
-
-    StatisticData = StatisticMetaData = None
-    for mod in (
-        "homeassistant.components.recorder.statistics",
-        "homeassistant.components.recorder.models",
-    ):
-        try:
-            import importlib
-            m = importlib.import_module(mod)
-            StatisticData = getattr(m, "StatisticData", None)
-            StatisticMetaData = getattr(m, "StatisticMetaData", None)
-            if StatisticData and StatisticMetaData:
-                break
-        except ImportError:
-            continue
-
-    if StatisticData is None or StatisticMetaData is None:
-        _LOGGER.warning("StatisticData/StatisticMetaData not found; skipping import")
-        return
-
-    try:
-        from homeassistant.components.recorder.statistics import StatisticMeanType
-        mean_kwargs: dict = {"mean_type": StatisticMeanType.ARITHMETIC}
-    except ImportError:
-        mean_kwargs = {"has_mean": True}
-
-    # Build tank-specific water level transform once for this import call.
-    wl_transform: Callable[[float], float] = lambda x: _tank_wl(x, tank_type, device_model)
+    wl_transform: Callable[[float], float] = lambda x: _tank_wl(
+        x, tank_type, device_model
+    )
 
     time_series = hourly_telemetry.get("timeSeries", {})
     short_id = device_id[:8]
     imported = 0
 
-    for api_key, id_suffix, display_name, unit, transform in _STAT_FIELDS:
-        effective_transform = wl_transform if id_suffix == "water_level" else transform
+    for api_key, id_suffix, display_name, unit in _STAT_FIELDS:
         series = time_series.get(api_key, [])
         if not series:
             _LOGGER.debug("No %s data for device %s, skipping statistic", api_key, short_id)
             continue
         stats = _build_hourly_stats(
             series,
-            StatisticData,
-            effective_transform,
+            wl_transform if id_suffix == "water_level" else None,
             filter_low_outliers=(id_suffix == "water_level"),
         )
         if not stats:
             continue
         meta = StatisticMetaData(
-            **mean_kwargs,
+            **_MEAN_KWARGS,
             has_sum=False,
             name=f"Boum {short_id} {display_name}",
             source=DOMAIN,

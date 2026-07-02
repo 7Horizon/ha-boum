@@ -6,7 +6,7 @@ UPDATE_INTERVAL = timedelta(minutes=15)
 API_BASE_URL = "https://api.boum.us/v1"
 DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 MINUTELY_HOURS = 2              # current sensor values only
-SENSOR_STATS_HOURS = 80        # HA statistics window for sensor calculations (~3.5 days)
+SENSOR_STATS_HOURS = 100       # HA statistics window for sensors: 3 complete days + today
 STATISTICS_BACKFILL_DAYS = 7   # max API backfill on first install
 WEATHER_ENTITY = "weather.openweathermap"
 

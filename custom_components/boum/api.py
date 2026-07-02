@@ -65,6 +65,18 @@ class BoumApi:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": self._access_token or ""}
 
+    async def _async_reauth(self) -> None:
+        """Refresh the access token, falling back to a full signin.
+
+        The refresh token itself expires eventually; without the fallback the
+        integration would stay broken until a manual reload.
+        """
+        try:
+            await self._refresh_access_token()
+        except BoumApiError:
+            _LOGGER.debug("Token refresh failed; performing full signin")
+            await self.authenticate()
+
     async def _get(self, path: str, params: dict | None = None) -> dict:
         """GET request with automatic token refresh on 401."""
         url = f"{API_BASE_URL}{path}"
@@ -74,7 +86,7 @@ class BoumApi:
             ) as resp:
                 if resp.status == 401:
                     _LOGGER.debug("Access token expired, refreshing")
-                    await self._refresh_access_token()
+                    await self._async_reauth()
                     async with self._session.get(
                         url, headers=self._headers, params=params
                     ) as retry:

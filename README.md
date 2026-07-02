@@ -71,7 +71,7 @@ Water volume that left the tank over the last 24 hours, calculated from consecut
 Two outlier filters prevent the ultrasonic sensor from recording false drops when the controller lid is opened:
 
 - **IQR filter (import)** — applied per-minute before the hourly mean is written to `water_level`. Statistical outlier readings within the same hour are excluded from the average.
-- **Spike-and-recovery filter (computation)** — applied before writing `water_usage`. A level reading is classified as a spike and replaced with the average of its neighbours when the level drops by ≥ 3 L *and* recovers by ≥ 50 % of that drop in the very next hour.
+- **Spike-and-recovery filter (computation)** — applied before writing `water_usage`. A level reading is classified as a spike and replaced with the average of its neighbours when the level drops by ≥ 1 L *and* recovers by ≥ 50 % of that drop in the very next hour. Real consumption never recovers, so genuine usage is not filtered.
 
 Data source: HA long-term statistics (`boum:<id>_water_usage`).
 
