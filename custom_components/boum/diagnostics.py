@@ -18,8 +18,8 @@ async def async_get_config_entry_diagnostics(
         # Exclude the raw hourly/recent blobs to keep diagnostics readable.
         entry_data: dict = {
             "name": device_data.get("name"),
-            "tank_type": coordinator.tank_type,
-            "device_model": coordinator.device_model,
+            "tank_type": coordinator.tank_type(device_id),
+            "device_model": coordinator.device_model(device_id),
             "telemetry_keys_minutely": list(
                 device_data.get("minutely", {}).get("timeSeries", {}).keys()
             ),

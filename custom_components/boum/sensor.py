@@ -185,8 +185,8 @@ class BoumWaterLevelSensor(CoordinatorEntity, SensorEntity):
     def native_value(self) -> float | None:
         level = current_level(
             self.coordinator.data.get(self._device_id, {}),
-            self.coordinator.tank_type,
-            self.coordinator.device_model,
+            self.coordinator.tank_type(self._device_id),
+            self.coordinator.device_model(self._device_id),
         )
         return round(level, 2) if level is not None else None
 
@@ -319,7 +319,9 @@ class BoumDaysRemainingSensor(CoordinatorEntity, SensorEntity):
     def native_value(self) -> float | None:
         device_data = self.coordinator.data.get(self._device_id, {})
         level = current_level(
-            device_data, self.coordinator.tank_type, self.coordinator.device_model
+            device_data,
+            self.coordinator.tank_type(self._device_id),
+            self.coordinator.device_model(self._device_id),
         )
         if level is None:
             return None

@@ -9,12 +9,27 @@
           "password": "Password"
         }
       },
+      "select_device": {
+        "title": "Select Device",
+        "description": "Choose the Boum device to add.",
+        "data": {
+          "device": "Device"
+        }
+      },
       "tank": {
         "title": "Tank & Controller",
-        "description": "Select the tank size and controller type. These are used to calculate the water level accurately.",
+        "description": "Select the tank size and controller type for {device_name}. These are used to calculate the water level accurately.",
         "data": {
           "tank_type": "Tank size",
           "device_model": "Controller"
+        }
+      },
+      "add_another": {
+        "title": "Device added",
+        "description": "Do you want to add another device?",
+        "menu_options": {
+          "select_device": "Add another device",
+          "finish": "Finish setup"
         }
       }
     },
@@ -23,19 +38,31 @@
       "invalid_auth": "Invalid credentials."
     },
     "abort": {
-      "already_configured": "This account is already configured."
+      "already_configured": "This account is already configured.",
+      "no_devices": "No claimed devices found in this Boum account."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "Boum Settings",
-        "description": "Change the tank size or controller type.",
+        "description": "Select the device to add or reconfigure.",
+        "data": {
+          "device": "Device"
+        }
+      },
+      "tank": {
+        "title": "Tank & Controller",
+        "description": "Select the tank size and controller type for {device_name}.",
         "data": {
           "tank_type": "Tank size",
           "device_model": "Controller"
         }
       }
+    },
+    "abort": {
+      "cannot_connect": "Failed to connect to the Boum API.",
+      "no_devices": "No claimed devices found in this Boum account."
     }
   },
   "entity": {

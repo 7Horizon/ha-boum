@@ -13,6 +13,7 @@ WEATHER_ENTITY = "weather.openweathermap"
 # Config / options keys
 CONF_TANK_TYPE = "tank_type"
 CONF_DEVICE_MODEL = "device_model"
+CONF_DEVICES = "devices"  # options dict: device_id → {tank_type, device_model}
 
 # Valid values
 TANK_TYPES = ["35l", "55l", "32l"]

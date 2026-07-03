@@ -9,12 +9,27 @@
           "password": "Passwort"
         }
       },
+      "select_device": {
+        "title": "Gerät auswählen",
+        "description": "Wähle das Boum-Gerät aus, das hinzugefügt werden soll.",
+        "data": {
+          "device": "Gerät"
+        }
+      },
       "tank": {
         "title": "Tankgrösse & Steuerung",
-        "description": "Wähle den Tanktyp und die Steuerung. Diese Angaben werden für die Berechnung des Füllstands benötigt.",
+        "description": "Wähle Tanktyp und Steuerung für {device_name}. Diese Angaben werden für die Berechnung des Füllstands benötigt.",
         "data": {
           "tank_type": "Tankgrösse",
           "device_model": "Steuerung"
+        }
+      },
+      "add_another": {
+        "title": "Gerät hinzugefügt",
+        "description": "Möchtest du ein weiteres Gerät hinzufügen?",
+        "menu_options": {
+          "select_device": "Weiteres Gerät hinzufügen",
+          "finish": "Einrichtung abschliessen"
         }
       }
     },
@@ -23,19 +38,31 @@
       "invalid_auth": "Ungültige Zugangsdaten."
     },
     "abort": {
-      "already_configured": "Dieses Konto ist bereits eingerichtet."
+      "already_configured": "Dieses Konto ist bereits eingerichtet.",
+      "no_devices": "Keine Geräte in diesem Boum-Konto gefunden."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "Boum Einstellungen",
-        "description": "Tankgrösse oder Steuerung anpassen.",
+        "description": "Wähle das Gerät, das hinzugefügt oder angepasst werden soll.",
+        "data": {
+          "device": "Gerät"
+        }
+      },
+      "tank": {
+        "title": "Tankgrösse & Steuerung",
+        "description": "Wähle Tanktyp und Steuerung für {device_name}.",
         "data": {
           "tank_type": "Tankgrösse",
           "device_model": "Steuerung"
         }
       }
+    },
+    "abort": {
+      "cannot_connect": "Verbindung zur Boum API fehlgeschlagen.",
+      "no_devices": "Keine Geräte in diesem Boum-Konto gefunden."
     }
   },
   "entity": {

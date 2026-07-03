@@ -98,15 +98,17 @@ class BoumApi:
             raise BoumApiError(f"Request to {path} failed: {err}") from err
 
     async def get_claimed_devices(self) -> list[dict]:
-        """Return id + name for all claimed devices.
+        """Return id + name for all claimed devices, excluding rejected claims.
 
         The 'name' key is the user-defined device name from the Boum app,
-        or an empty string if the API does not return one.
+        or an empty string if the API does not return one.  Entries with
+        state == "rejected" are filtered out; unknown states are kept.
         """
         data = await self._get("/devices/claimed")
         return [
             {"id": d["id"], "name": d.get("name") or d.get("thingName") or ""}
             for d in data.get("data", [])
+            if d.get("state") != "rejected"
         ]
 
     async def get_device_state(self, device_id: str) -> dict:

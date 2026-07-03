@@ -15,6 +15,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .api import BoumApi, BoumApiError
 from .const import (
     CONF_DEVICE_MODEL,
+    CONF_DEVICES,
     CONF_TANK_TYPE,
     DEFAULT_DEVICE_MODEL,
     DEFAULT_TANK_TYPE,
@@ -167,13 +168,23 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
         self.api = api
         self.config_entry = entry
 
-    @property
-    def tank_type(self) -> str:
-        return self.config_entry.options.get(CONF_TANK_TYPE, DEFAULT_TANK_TYPE)
+    def tank_type(self, device_id: str) -> str:
+        """Configured tank type for a device.
 
-    @property
-    def device_model(self) -> str:
-        return self.config_entry.options.get(CONF_DEVICE_MODEL, DEFAULT_DEVICE_MODEL)
+        Falls back to the legacy account-wide option (pre multi-device
+        installs), then to the default.
+        """
+        per_device = self.config_entry.options.get(CONF_DEVICES, {}).get(device_id, {})
+        return per_device.get(CONF_TANK_TYPE) or self.config_entry.options.get(
+            CONF_TANK_TYPE, DEFAULT_TANK_TYPE
+        )
+
+    def device_model(self, device_id: str) -> str:
+        """Configured controller model for a device (same fallback chain as tank_type)."""
+        per_device = self.config_entry.options.get(CONF_DEVICES, {}).get(device_id, {})
+        return per_device.get(CONF_DEVICE_MODEL) or self.config_entry.options.get(
+            CONF_DEVICE_MODEL, DEFAULT_DEVICE_MODEL
+        )
 
     async def _async_update_data(self) -> dict:
         try:
@@ -181,8 +192,14 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
         except BoumApiError as err:
             raise UpdateFailed(f"Could not fetch device list: {err}") from err
 
+        # Only poll devices the user has configured (tank/controller known).
+        # Legacy entries without a devices dict keep polling everything.
+        configured = self.config_entry.options.get(CONF_DEVICES)
+        if configured is not None:
+            devices = [d for d in devices if d["id"] in configured]
+
         if not devices:
-            _LOGGER.warning("No claimed Boum devices found for this account")
+            _LOGGER.warning("No configured Boum devices found for this account")
             return {}
 
         now = datetime.now(timezone.utc)
@@ -242,7 +259,11 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
                 }
                 try:
                     import_statistics(
-                        self.hass, device_id, hourly, self.tank_type, self.device_model
+                        self.hass,
+                        device_id,
+                        hourly,
+                        self.tank_type(device_id),
+                        self.device_model(device_id),
                     )
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.warning("Statistics import failed for %s: %s", device_id, err)
@@ -354,7 +375,9 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
 
         results: dict[str, PredictionResult] = {}
         for device_id, data in device_data.items():
-            level = current_level(data, self.tank_type, self.device_model)
+            level = current_level(
+                data, self.tank_type(device_id), self.device_model(device_id)
+            )
             if level is None:
                 continue
             try:

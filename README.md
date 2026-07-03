@@ -31,13 +31,16 @@ Unofficial Home Assistant integration for the [Boum](https://boum.garden) smart 
 
 Go to **Settings → Devices & Services → Add Integration** and search for **Boum**.
 
-The setup runs in two steps:
+The setup runs in three steps:
 
 **Step 1 — Credentials**
 Enter your Boum account e-mail address and password.
 
-**Step 2 — Tank & Controller**
-Select the tank size and controller model. These are needed to convert the ultrasonic sensor reading into an accurate water volume.
+**Step 2 — Select Device**
+Pick the device to add from a dropdown of the devices claimed in your account. Devices with a rejected claim status are not listed.
+
+**Step 3 — Tank & Controller**
+Select the tank size and controller model for the chosen device. These are needed to convert the ultrasonic sensor reading into an accurate water volume.
 
 | Tank | Compatible controllers |
 |---|---|
@@ -45,7 +48,9 @@ Select the tank size and controller model. These are needed to convert the ultra
 | 55 Liter | Boum 2, Boum 3 |
 | 32 Liter | Boum Core |
 
-Tank type and controller can be changed later via **Settings → Devices & Services → Boum → Configure**.
+After each device you can either add another one or finish the setup. Only devices configured here are polled and get entities.
+
+More devices can be added later — and tank/controller of existing ones changed — via **Settings → Devices & Services → Boum → Configure**: pick the device from the dropdown, then adjust its settings.
 
 ---
 
