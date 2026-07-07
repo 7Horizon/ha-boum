@@ -1,11 +1,12 @@
 {
   "domain": "boum",
   "name": "Boum",
-  "version": "0.1.0",
+  "codeowners": ["@7Horizon"],
   "config_flow": true,
   "dependencies": ["recorder"],
   "documentation": "https://github.com/7Horizon/ha-boum",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/7Horizon/ha-boum/issues",
   "requirements": [],
-  "codeowners": ["@7Horizon"],
-  "iot_class": "cloud_polling"
+  "version": "0.1.0"
 }
