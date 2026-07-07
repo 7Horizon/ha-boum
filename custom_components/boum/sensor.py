@@ -240,12 +240,13 @@ class BoumLastIrrigationSensor(CoordinatorEntity, SensorEntity):
 
 
 class Boum24hVolumeSensor(CoordinatorEntity, SensorEntity):
-    """Sum of an hourly volume statistic over the last 24 hours.
+    """Sum of an hourly volume statistic over the last 24 complete hours.
 
     Instantiated for water_usage (tank level drops, spike-filtered — basis for
     Days Remaining and the weather forecast) and water_pumped (exact pump
-    volume from pumpStopped log events).  The still-running hour is excluded
-    to avoid a fluctuating value.
+    volume from pumpStopped log events).  The window is aligned to hour
+    boundaries and excludes the still-running hour, so the value changes at
+    most once per hour instead of jittering with every refresh.
     """
 
     _attr_has_entity_name = True
@@ -274,9 +275,10 @@ class Boum24hVolumeSensor(CoordinatorEntity, SensorEntity):
         if not hourly:
             return None
 
-        now = datetime.now(timezone.utc)
-        current_hour = now.replace(minute=0, second=0, microsecond=0)
-        cutoff = now - timedelta(hours=24)
+        current_hour = datetime.now(timezone.utc).replace(
+            minute=0, second=0, microsecond=0
+        )
+        cutoff = current_hour - timedelta(hours=24)
 
         values = [val for ts, val in hourly.items() if cutoff <= ts < current_hour]
         return round(sum(values), 1) if values else None

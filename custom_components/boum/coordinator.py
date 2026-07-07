@@ -63,13 +63,20 @@ def _compute_hourly_usage(
 ) -> dict[datetime, float]:
     """Return hourly water consumption (L) using the Boum level-based algorithm.
 
-    Applies filter_level_spikes first (lid-open artefacts), then delegates to
-    calculate_water_usage_from_level which mirrors the original Boum app logic:
-    noise gate + per-hour drop accumulation.
+    Only completed hours are used: the running hour's mean still drifts with
+    every refresh, which would make the newest bucket — and with it the 24 h
+    sensor sum — jitter between refreshes.  Applies filter_level_spikes first
+    (lid-open artefacts), then delegates to calculate_water_usage_from_level
+    which mirrors the original Boum app logic: noise gate + per-hour drop
+    accumulation.
     """
-    if len(water_level) < 2:
+    current_hour = datetime.now(timezone.utc).replace(
+        minute=0, second=0, microsecond=0
+    )
+    complete = {ts: v for ts, v in water_level.items() if ts < current_hour}
+    if len(complete) < 2:
         return {}
-    points = sorted(water_level.items(), key=lambda p: p[0])
+    points = sorted(complete.items(), key=lambda p: p[0])
     points = filter_level_spikes(points)
     return calculate_water_usage_from_level(points)
 

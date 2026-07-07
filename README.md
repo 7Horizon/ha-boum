@@ -71,7 +71,7 @@ Data source: per-minute API data (`interval=60s`), last 2 hours.
 ### Water Usage
 **Unit:** L
 
-Water volume that left the tank over the last 24 hours, calculated from consecutive tank level drops. This includes evaporation, leakage, and any passive seepage — not just what the pump delivered. This is the primary consumption metric used for Days Remaining and the weather-based forecast.
+Water volume that left the tank over the last 24 complete hours, calculated from consecutive tank level drops. This includes evaporation, leakage, and any passive seepage — not just what the pump delivered. This is the primary consumption metric used for Days Remaining and the weather-based forecast. Only completed hours enter the calculation and the window is aligned to hour boundaries, so the value changes at most once per hour.
 
 Two outlier filters prevent the ultrasonic sensor from recording false drops when the controller lid is opened:
 
@@ -85,7 +85,7 @@ Data source: HA long-term statistics (`boum:<id>_water_usage`).
 ### Water Pumped
 **Unit:** L
 
-Total water delivered by the irrigation pump in the last 24 hours. Derived from `pumpStopped` events in the device log (`GET /devices/{id}/log`), which report the exact volume measured per pump cycle (`payload.totalPumpedVolume`). Multiple cycles within the same hour are summed. The current (still-running) hour is excluded to avoid a fluctuating value.
+Total water delivered by the irrigation pump in the last 24 complete hours. Derived from `pumpStopped` events in the device log (`GET /devices/{id}/log`), which report the exact volume measured per pump cycle (`payload.totalPumpedVolume`). Multiple cycles within the same hour are summed. The window is aligned to hour boundaries and the current (still-running) hour is excluded, so the value changes at most once per hour.
 
 Data source: HA long-term statistics (`boum:<id>_water_pumped`).
 
