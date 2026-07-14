@@ -64,6 +64,8 @@ The current volume of water in the tank in litres. Calculated by converting the 
 - **32L (Boum Core):** piecewise linear interpolation over an empirically measured lookup table from the Boum app
 - **35L / 55L:** analytic frustum (truncated cone) formula — `V = (π/3) · h · (r₁² + r₁r₂ + r₂²)` — using the geometric dimensions of the respective tank model
 
+The reported value is the **median of the last 30 minutes** of per-minute readings, which suppresses ultrasonic measurement jitter and single outlier readings (e.g. an open controller lid). Resolution: 0.1 L.
+
 Data source: per-minute API data (`interval=60s`), last 2 hours.
 
 ---

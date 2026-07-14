@@ -166,7 +166,11 @@ def _device_name(coordinator: BoumCoordinator, device_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 class BoumWaterLevelSensor(CoordinatorEntity, SensorEntity):
-    """Water level in litres using the tank-specific formula from config."""
+    """Water level in litres using the tank-specific formula from config.
+
+    Reports the 30-minute median of the per-minute readings (see
+    coordinator.current_level) at 0.1 L resolution to keep the curve calm.
+    """
 
     _attr_has_entity_name = True
     _attr_translation_key = "water_level"
@@ -188,7 +192,7 @@ class BoumWaterLevelSensor(CoordinatorEntity, SensorEntity):
             self.coordinator.tank_type(self._device_id),
             self.coordinator.device_model(self._device_id),
         )
-        return round(level, 2) if level is not None else None
+        return round(level, 1) if level is not None else None
 
 
 class BoumSensor(CoordinatorEntity, SensorEntity):

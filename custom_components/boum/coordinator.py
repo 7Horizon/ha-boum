@@ -130,15 +130,53 @@ def latest_value(time_series: dict, key: str) -> float | None:
     return None
 
 
+_LEVEL_MEDIAN_WINDOW = timedelta(minutes=30)
+
+
+def _median_raw_level(series: list[dict]) -> float | None:
+    """Median waterTableRange (cm) over the last 30 min of per-minute readings.
+
+    The median suppresses ultrasonic measurement jitter and is robust against
+    single outlier readings (lid open at poll time).  The window is anchored
+    to the newest reading rather than the wall clock so it still works when
+    the device sleeps and the data lags behind.
+    """
+    points: list[tuple[datetime, float]] = []
+    for point in series:
+        ts = _to_datetime(point.get("x"))
+        v = point.get("y")
+        if ts is None or v is None:
+            continue
+        try:
+            points.append((ts, float(v)))
+        except (TypeError, ValueError):
+            continue
+    if not points:
+        return None
+    newest = max(ts for ts, _ in points)
+    window = sorted(v for ts, v in points if ts >= newest - _LEVEL_MEDIAN_WINDOW)
+    mid = len(window) // 2
+    if len(window) % 2:
+        return window[mid]
+    return (window[mid - 1] + window[mid]) / 2
+
+
 def current_level(device_data: dict, tank_type: str, device_model: str) -> float | None:
-    """Return current water level in litres from coordinator device data."""
-    for data_key in ("minutely", "hourly"):
+    """Return current water level in litres from coordinator device data.
+
+    Uses the 30-minute median of the per-minute readings; falls back to the
+    latest hourly value when no minutely data is available.
+    """
+    raw = _median_raw_level(
+        device_data.get("minutely", {}).get("timeSeries", {}).get("waterTableRange", [])
+    )
+    if raw is None:
         raw = latest_value(
-            device_data.get(data_key, {}).get("timeSeries", {}), "waterTableRange"
+            device_data.get("hourly", {}).get("timeSeries", {}), "waterTableRange"
         )
-        if raw is not None:
-            return water_level_liters(raw, tank_type, device_model)
-    return None
+    if raw is None:
+        return None
+    return water_level_liters(raw, tank_type, device_model)
 
 
 def _stat_rows(stats: dict, stat_id: str):
