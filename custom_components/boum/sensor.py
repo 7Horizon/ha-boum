@@ -138,7 +138,11 @@ async def async_setup_entry(
         )
         entities.append(BoumLastIrrigationSensor(coordinator, device_id))
         entities.append(Boum24hVolumeSensor(coordinator, device_id, "water_usage", "mdi:water-circle"))
-        entities.append(Boum24hVolumeSensor(coordinator, device_id, "water_pumped", "mdi:pump"))
+        entities.append(
+            Boum24hVolumeSensor(
+                coordinator, device_id, "water_pumped", "mdi:pump", empty_window_value=0.0
+            )
+        )
         entities.append(BoumDaysRemainingSensor(coordinator, device_id))
         entities.append(BoumWaterForecastSensor(coordinator, device_id))
     async_add_entities(entities)
@@ -251,6 +255,11 @@ class Boum24hVolumeSensor(CoordinatorEntity, SensorEntity):
     volume from pumpStopped log events).  The window is aligned to hour
     boundaries and excludes the still-running hour, so the value changes at
     most once per hour instead of jittering with every refresh.
+
+    empty_window_value is returned when the statistic exists but has no rows
+    in the 24 h window: 0.0 for water_pumped (sparse statistic — no rows
+    simply means the pump was idle), None for water_usage (dense statistic —
+    no rows means missing data).
     """
 
     _attr_has_entity_name = True
@@ -258,11 +267,18 @@ class Boum24hVolumeSensor(CoordinatorEntity, SensorEntity):
     _attr_state_class = SensorStateClass.MEASUREMENT
 
     def __init__(
-        self, coordinator: BoumCoordinator, device_id: str, stat_key: str, icon: str
+        self,
+        coordinator: BoumCoordinator,
+        device_id: str,
+        stat_key: str,
+        icon: str,
+        *,
+        empty_window_value: float | None = None,
     ) -> None:
         super().__init__(coordinator)
         self._device_id = device_id
         self._stat_key = stat_key
+        self._empty_window_value = empty_window_value
         self._attr_translation_key = stat_key
         self._attr_icon = icon
         self._attr_unique_id = f"{DOMAIN}_{device_id}_{stat_key}"
@@ -285,7 +301,7 @@ class Boum24hVolumeSensor(CoordinatorEntity, SensorEntity):
         cutoff = current_hour - timedelta(hours=24)
 
         values = [val for ts, val in hourly.items() if cutoff <= ts < current_hour]
-        return round(sum(values), 1) if values else None
+        return round(sum(values), 1) if values else self._empty_window_value
 
 
 class BoumDaysRemainingSensor(CoordinatorEntity, SensorEntity):
