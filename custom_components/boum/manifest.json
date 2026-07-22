@@ -8,5 +8,5 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/7Horizon/ha-boum/issues",
   "requirements": [],
-  "version": "1.0.1-beta.2"
+  "version": "1.0.1-beta.3"
 }

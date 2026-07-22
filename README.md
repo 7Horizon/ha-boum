@@ -140,9 +140,9 @@ Weather-aware prediction of how many days the tank will last. Combines historica
 
 **How it works:**
 
-1. **Training data** — Daily water usage totals (from `boum:<id>_water_usage` in HA long-term statistics) and daily average temperatures (from weather entity state history) for the last 30 days are paired to form training examples.
+1. **Training data** — Daily water usage totals (from `boum:<id>_water_usage` in HA long-term statistics) and daily average temperatures (from weather entity state history) for the last 30 complete days are paired to form training examples. Days without any consumption are kept as examples with a total of 0 L — they carry real information ("this warm, still nothing used"), and dropping them would train the model on irrigation days only and inflate every prediction. Today is excluded, since a partial total would pair with a full-day temperature.
 
-2. **Model fitting** — A linear regression is fitted: `consumption = a × avg_temp + b`. Requires at least 3 days of paired data. If less data is available, a physics-based heuristic is used instead: `max(0, 0.12 × (avg_temp − 15))`, assuming evapotranspiration grows above 15 °C.
+2. **Model fitting** — A linear regression is fitted: `consumption = a × avg_temp + b`. The slope is clamped to be non-negative (more heat cannot mean less water; a negative slope means the data is noise and the model falls back to the plain average). The intercept is left free: plants only start drawing water above a threshold temperature, so the fitted line legitimately crosses zero at a positive temperature and needs a negative intercept to express that. Negative predictions are clipped to zero afterwards. Requires at least 3 days of paired data; below that a physics-based heuristic is used instead: `max(0, 0.12 × (avg_temp − 15))`, assuming evapotranspiration grows above 15 °C.
 
 3. **Rain reduction** — Predicted consumption is reduced based on precipitation:
    - ≥ 10 mm → × 0.2

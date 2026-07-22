@@ -25,6 +25,15 @@ class PredictionResult:
 def _fit_model(pairs: list[tuple[float, float]]) -> tuple[float, float] | None:
     """Least-squares linear fit: consumption = a * avg_temp + b.
 
+    The slope is clamped to be non-negative — more heat cannot mean less
+    water, so a negative slope is noise and the model falls back to the plain
+    average.  The intercept is deliberately *not* clamped: plants only start
+    drawing water above a threshold temperature, so the fitted line genuinely
+    crosses zero at a positive temperature and needs a negative intercept to
+    express that.  Forcing b >= 0 would tilt the whole line upwards and
+    inflate every prediction.  Negative predictions are clipped in
+    _predict_day instead, which is where the physical constraint belongs.
+
     Returns (a, b) or None if fewer than 3 data points.
     """
     n = len(pairs)
@@ -41,8 +50,7 @@ def _fit_model(pairs: list[tuple[float, float]]) -> tuple[float, float] | None:
         return None
 
     a = max(0.0, (n * sxy - sx * sy) / denom)
-    b = max(0.0, (sy - a * sx) / n)
-    return a, b
+    return a, (sy - a * sx) / n
 
 
 def _predict_day(

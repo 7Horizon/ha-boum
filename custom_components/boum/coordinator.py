@@ -458,14 +458,24 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
         return days
 
     async def _async_get_daily_consumption(self, device_id: str) -> dict[date, float]:
-        """Return daily water usage (L) from water_usage HA statistics (tank level drops)."""
+        """Return daily water usage (L) from water_usage HA statistics (tank level drops).
+
+        Days without any consumption are kept with a total of 0.0 — they are
+        genuine training examples ("this warm, still nothing used"), and
+        dropping them would train the forecast on irrigation days only and
+        inflate every prediction.  Today is excluded because a partial day
+        pairs a partial total with a full-day temperature.
+        """
         stat_id = f"{DOMAIN}:{device_id[:8]}_water_usage"
-        start = datetime.now(timezone.utc) - timedelta(days=30)
+        midnight = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        start = midnight - timedelta(days=30)
 
         stats = await self._async_stats_during_period(start, {stat_id})
         daily: defaultdict[date, float] = defaultdict(float)
         for ts, mean in _stat_rows(stats, stat_id):
-            if mean > 0:
+            if ts < midnight:
                 daily[ts.date()] += mean
         return dict(daily)
 
