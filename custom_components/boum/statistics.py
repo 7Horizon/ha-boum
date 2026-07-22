@@ -177,7 +177,7 @@ async def import_water_usage_statistics(
     """Write pre-computed hourly water usage (L) to HA long-term statistics.
 
     usage_by_hour maps hour-start datetime → litres consumed that hour (≥ 0).
-    Derived from tank level drops with spike filtering applied.
+    Derived from tank level drops via baseline tracking (see consumption.py).
     """
     short_id = device_id[:8]
     await _async_write_summing_stat(

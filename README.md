@@ -73,12 +73,21 @@ Data source: per-minute API data (`interval=60s`), last 2 hours.
 ### Water Usage
 **Unit:** L
 
-Water volume that left the tank over the last 24 complete hours, calculated from consecutive tank level drops. This includes evaporation, leakage, and any passive seepage — not just what the pump delivered. This is the primary consumption metric used for Days Remaining and the weather-based forecast. Only completed hours enter the calculation and the window is aligned to hour boundaries, so the value changes at most once per hour.
+Water volume that left the tank over the last 24 complete hours, derived from the tank level history. This includes evaporation, leakage, and any passive seepage — not just what the pump delivered. It is the primary consumption metric behind Days Remaining and the weather-based forecast. Only completed hours enter the calculation and the window is aligned to hour boundaries, so the value changes at most once per hour.
 
-Two outlier filters prevent the ultrasonic sensor from recording false drops when the controller lid is opened:
+**Why not simply sum the level drops:** doing so rectifies every fluctuation that comes back into phantom consumption. The dominant source is not random noise but the diurnal drift of the ultrasonic reading with air temperature — the speed of sound changes as the air warms up, which alone fakes roughly half a litre a day.
 
-- **IQR filter (import)** — applied per-minute before the hourly mean is written to `water_level`. Statistical outlier readings within the same hour are excluded from the average.
-- **Spike-and-recovery filter (computation)** — applied before writing `water_usage`. A level reading is classified as a spike and replaced with the average of its neighbours when the level drops by ≥ 1 L *and* recovers by ≥ 50 % of that drop in the very next hour. Real consumption never recovers, so genuine usage is not filtered.
+Consumption is therefore tracked against a **confirmed baseline**:
+
+1. **Rolling median (3 h)** over the hourly levels — removes single-hour outliers such as the lid-open artefact.
+2. **Deadband (± 0.3 L)** around the baseline — movements inside the band are treated as sensor artefacts and ignored. This is where noise and thermal drift are absorbed.
+3. **Confirmed drops** beyond the band are booked as consumption and pull the baseline down. **Confirmed rises** are inflow — rain entering through the lid, or a refill — and only move the baseline up; they never cancel consumption booked earlier. Because inflow and outflow are processed in sequence rather than netted against each other, slow rain cannot mask real consumption.
+4. Each confirmed drop is **spread over the hours it spans**, weighted by the raw per-hour drops, so the timing stays meaningful.
+5. The **pump log acts as a per-hour floor**: water the pump demonstrably moved is counted as consumed even if simultaneous inflow kept the level flat.
+
+Two consequences worth knowing: very slow consumption is registered in steps once it breaks through the band, so individual hours are chunkier than the daily total; and at most one deadband's worth (0.3 L) can be pending at the end of the window. That residual is bounded — it does not grow with the window length.
+
+A third filter sits further upstream: an **IQR filter** drops statistical outliers among the per-minute readings before the hourly mean is written to `water_level`.
 
 Data source: HA long-term statistics (`boum:<id>_water_usage`).
 
@@ -181,7 +190,7 @@ The integration writes the following external statistics into the HA recorder (h
 
 | Statistic ID | Unit | Description |
 |---|---|---|
-| `boum:<id>_water_usage` | L | Tank level drop per hour (spike-filtered) — feeds Water Usage sensor & predictions |
+| `boum:<id>_water_usage` | L | Consumption per hour (baseline-tracked level drops) — feeds Water Usage sensor & predictions |
 | `boum:<id>_water_pumped` | L | Water delivered by the pump per hour (from pumpStopped log events) — feeds Water Pumped sensor |
 | `boum:<id>_water_level` | L | Tank water level |
 | `boum:<id>_temperature` | °C | Environment temperature |
@@ -206,7 +215,7 @@ The coordinator polls the Boum API every **15 minutes**. Five requests are made 
 - **Hourly data** (`interval=3600s`, incremental) — only data since the last known statistic is fetched and written to HA long-term statistics. On first install this backfills 7 days of history; on subsequent polls it typically covers 1–2 hours.
 - **Device log** (`GET /devices/{id}/log`) — recent device events; `pumpStopped` entries are used to compute the `water_pumped` statistic.
 
-Daily Water Usage, Days Remaining, and the forecast are calculated from HA long-term statistics. Last Irrigation is resolved from the device log first, falling back to statistics for older history.
+Water Usage, Water Pumped, Days Remaining, and the forecast are calculated from HA long-term statistics. Last Irrigation is resolved from the device log first, falling back to statistics for older history.
 
 ---
 
@@ -214,5 +223,6 @@ Daily Water Usage, Days Remaining, and the forecast are calculated from HA long-
 
 - The Boum API does not expose the device model (Boum 2 / Boum 3 / Boum Core) or tank size. You must configure these manually during setup; otherwise the water level calculation will be inaccurate.
 - Flow rate is not tracked. Pump volume is measured precisely by the device firmware and reported as a `pumpStopped` log event after each cycle; this is more accurate than a flow-rate estimate and requires no separate sensor.
-- Lifting the controller lid during operation can cause the ultrasonic sensor to report an unrealistically low water level. The integration filters these artefacts on two levels (see Daily Water Usage above) so they do not affect consumption or forecast calculations.
+- The ultrasonic level reading is not perfectly stable: lifting the controller lid produces isolated false readings, and the speed of sound drifts with air temperature over the course of a day. Neither reaches the consumption or forecast calculations — see [Water Usage](#water-usage) for how they are filtered out.
+- Rain can enter the tank through the lid, usually as a small amount over a long period. Such inflow raises the tracked baseline instead of being netted against consumption, so it does not make Water Usage look artificially low.
 - This is an unofficial integration and is not affiliated with or endorsed by Boum.

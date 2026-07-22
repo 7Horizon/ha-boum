@@ -250,8 +250,8 @@ class BoumLastIrrigationSensor(CoordinatorEntity, SensorEntity):
 class Boum24hVolumeSensor(CoordinatorEntity, SensorEntity):
     """Sum of an hourly volume statistic over the last 24 complete hours.
 
-    Instantiated for water_usage (tank level drops, spike-filtered — basis for
-    Days Remaining and the weather forecast) and water_pumped (exact pump
+    Instantiated for water_usage (baseline-tracked tank level drops — basis
+    for Days Remaining and the weather forecast) and water_pumped (exact pump
     volume from pumpStopped log events).  The window is aligned to hour
     boundaries and excludes the still-running hour, so the value changes at
     most once per hour instead of jittering with every refresh.

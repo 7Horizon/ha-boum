@@ -60,15 +60,14 @@ def _to_datetime(ts) -> datetime | None:
 
 def _compute_hourly_usage(
     water_level: dict[datetime, float],
+    pumped_by_hour: dict[datetime, float] | None = None,
 ) -> dict[datetime, float]:
-    """Return hourly water consumption (L) using the Boum level-based algorithm.
+    """Return hourly water consumption (L) from the water level history.
 
     Only completed hours are used: the running hour's mean still drifts with
     every refresh, which would make the newest bucket — and with it the 24 h
-    sensor sum — jitter between refreshes.  Applies filter_level_spikes first
-    (lid-open artefacts), then delegates to calculate_water_usage_from_level
-    which mirrors the original Boum app logic: noise gate + per-hour drop
-    accumulation.
+    sensor sum — jitter between refreshes.  The actual work (median smoothing,
+    baseline tracking, pump floor) happens in calculate_water_usage_from_level.
     """
     current_hour = datetime.now(timezone.utc).replace(
         minute=0, second=0, microsecond=0
@@ -77,39 +76,7 @@ def _compute_hourly_usage(
     if len(complete) < 2:
         return {}
     points = sorted(complete.items(), key=lambda p: p[0])
-    points = filter_level_spikes(points)
-    return calculate_water_usage_from_level(points)
-
-
-def filter_level_spikes(
-    points: list[tuple[datetime, float]],
-    min_drop: float = 1.0,
-) -> list[tuple[datetime, float]]:
-    """Replace spike readings caused by the ultrasonic sensor seeing the open lid.
-
-    A spike is detected when the level drops by at least *min_drop* litres AND the
-    next reading recovers by at least 50 % of that drop.  The spike value is
-    replaced with the average of its two neighbours so that drop-based consumption
-    calculations ignore the artefact.  The recovery condition makes this safe: real
-    consumption (pump cycles) does not recover, so genuine usage is never removed.
-    Handles single-hour spikes only; multi-hour lid-open periods are covered by the
-    per-minute IQR filter in statistics.py.
-    """
-    if len(points) < 3:
-        return points
-    result = [points[0]]
-    for i in range(1, len(points) - 1):
-        prev_val = result[-1][1]
-        curr_ts, curr_val = points[i]
-        next_val = points[i + 1][1]
-        drop = prev_val - curr_val
-        recovery = next_val - curr_val
-        if drop >= min_drop and recovery >= drop * 0.5:
-            result.append((curr_ts, (prev_val + next_val) / 2))
-        else:
-            result.append(points[i])
-    result.append(points[-1])
-    return result
+    return calculate_water_usage_from_level(points, pumped_by_hour=pumped_by_hour)
 
 
 def _last_pump_from_log(log_entries: list[dict]) -> datetime | None:
@@ -314,7 +281,10 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
                     _LOGGER.warning("Statistics import failed for %s: %s", device_id, err)
 
                 try:
-                    usage_by_hour = _compute_hourly_usage(hass_stats.get("water_level", {}))
+                    usage_by_hour = _compute_hourly_usage(
+                        hass_stats.get("water_level", {}),
+                        hass_stats.get("water_pumped", {}),
+                    )
                     await import_water_usage_statistics(self.hass, device_id, usage_by_hour)
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.warning("Water usage statistics import failed for %s: %s", device_id, err)
