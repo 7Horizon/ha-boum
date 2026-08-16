@@ -64,10 +64,11 @@ def _compute_hourly_usage(
 ) -> dict[datetime, float]:
     """Return hourly water consumption (L) from the water level history.
 
-    Only completed hours are used: the running hour's mean still drifts with
-    every refresh, which would make the newest bucket — and with it the 24 h
-    sensor sum — jitter between refreshes.  The actual work (median smoothing,
-    baseline tracking, pump floor) happens in calculate_water_usage_from_level.
+    Only completed hours are used — for the level *and* for the pump volumes:
+    the running hour's mean still drifts with every refresh, which would make
+    the newest bucket — and with it the 24 h sensor sum — jitter between
+    refreshes.  The actual work (median smoothing, baseline tracking, pump
+    attribution) happens in calculate_water_usage_from_level.
     """
     current_hour = datetime.now(timezone.utc).replace(
         minute=0, second=0, microsecond=0
@@ -76,7 +77,10 @@ def _compute_hourly_usage(
     if len(complete) < 2:
         return {}
     points = sorted(complete.items(), key=lambda p: p[0])
-    return calculate_water_usage_from_level(points, pumped_by_hour=pumped_by_hour)
+    complete_pumped = {
+        ts: v for ts, v in (pumped_by_hour or {}).items() if ts < current_hour
+    }
+    return calculate_water_usage_from_level(points, pumped_by_hour=complete_pumped)
 
 
 def _last_pump_from_log(log_entries: list[dict]) -> datetime | None:
@@ -261,6 +265,20 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
                 if last_irrigation is None:
                     last_irrigation = await self._async_get_last_irrigation(device_id)
 
+                # Merge the pump volumes the log reports right now over the
+                # stored statistic.  The consumption calculation has to see the
+                # cycles of the last hour, which are not in the statistics yet;
+                # max() keeps a stored value that the log window has already
+                # scrolled past.
+                pumped_since = (
+                    max(hass_stats["water_pumped"])
+                    if hass_stats.get("water_pumped")
+                    else None
+                )
+                pumped_by_hour = dict(hass_stats.get("water_pumped", {}))
+                for hour, volume in calculate_water_pumped_from_log(device_log).items():
+                    pumped_by_hour[hour] = max(pumped_by_hour.get(hour, 0.0), volume)
+
                 result[device_id] = {
                     "name": device_name,
                     "state": state,
@@ -270,7 +288,7 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
                     "hass_stats": hass_stats,
                 }
                 try:
-                    import_statistics(
+                    fresh_levels = import_statistics(
                         self.hass,
                         device_id,
                         hourly,
@@ -279,23 +297,39 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
                     )
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.warning("Statistics import failed for %s: %s", device_id, err)
+                    fresh_levels = {}
 
+                # hass_stats was read before the import above, so on its own it
+                # lags one poll behind and the newest hourly buckets would be
+                # missing from the consumption calculation.
+                level_by_hour = {**hass_stats.get("water_level", {}), **fresh_levels}
+
+                usage_by_hour: dict[datetime, float] = {}
                 try:
-                    usage_by_hour = _compute_hourly_usage(
-                        hass_stats.get("water_level", {}),
-                        hass_stats.get("water_pumped", {}),
-                    )
+                    usage_by_hour = _compute_hourly_usage(level_by_hour, pumped_by_hour)
                     await import_water_usage_statistics(self.hass, device_id, usage_by_hour)
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.warning("Water usage statistics import failed for %s: %s", device_id, err)
 
                 try:
-                    pumped_stats = hass_stats.get("water_pumped", {})
-                    since = (max(pumped_stats.keys()) if pumped_stats else None)
-                    pumped_by_hour = calculate_water_pumped_from_log(device_log, since=since)
-                    await import_water_pumped_statistics(self.hass, device_id, pumped_by_hour)
+                    await import_water_pumped_statistics(
+                        self.hass,
+                        device_id,
+                        calculate_water_pumped_from_log(device_log, since=pumped_since),
+                    )
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.warning("Water pumped statistics import failed for %s: %s", device_id, err)
+
+                # Hand the sensors this poll's numbers instead of the ones read
+                # from the recorder at the top of it — otherwise the water
+                # usage sensor trails the water pumped sensor by a full cycle
+                # and can read lower than it.
+                hass_stats["water_level"] = level_by_hour
+                hass_stats["water_pumped"] = pumped_by_hour
+                hass_stats["water_usage"] = {
+                    **hass_stats.get("water_usage", {}),
+                    **usage_by_hour,
+                }
             except BoumApiError as err:
                 raise UpdateFailed(
                     f"Error fetching data for device {device_id}: {err}"

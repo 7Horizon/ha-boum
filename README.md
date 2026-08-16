@@ -82,10 +82,16 @@ Consumption is therefore tracked against a **confirmed baseline**:
 1. **Rolling median (3 h)** over the hourly levels — removes single-hour outliers such as the lid-open artefact.
 2. **Deadband (± 0.3 L)** around the baseline — movements inside the band are treated as sensor artefacts and ignored. This is where noise and thermal drift are absorbed.
 3. **Confirmed drops** beyond the band are booked as consumption and pull the baseline down. **Confirmed rises** are inflow — rain entering through the lid, or a refill — and only move the baseline up; they never cancel consumption booked earlier. Because inflow and outflow are processed in sequence rather than netted against each other, slow rain cannot mask real consumption.
-4. Each confirmed drop is **spread over the hours it spans**, weighted by the raw per-hour drops, so the timing stays meaningful.
-5. The **pump log acts as a per-hour floor**: water the pump demonstrably moved is counted as consumed even if simultaneous inflow kept the level flat.
+4. Each confirmed drop is **spread evenly over the hours it spans**. This establishes how much the tank lost per day; where within the day it went is decided in the next step.
 
-Two consequences worth knowing: very slow consumption is registered in steps once it breaks through the band, so individual hours are chunkier than the daily total; and at most one deadband's worth (0.3 L) can be pending at the end of the window. That residual is bounded — it does not grow with the window length.
+The daily loss is then **attributed to the two processes that cause it**, because only one of them is observable per hour:
+
+- The **pump log** reports both the volume and the moment, to the second. That water is booked on the hour it was pumped in.
+- **Evaporation and seepage** run continuously and are far too slow to break the deadband within a single hour, so their timing is simply not in the data. Whatever the day lost beyond the pumped volume becomes an even background rate across that day.
+
+A day therefore ends up at `max(measured loss, pumped volume)`, which means **water usage can never come out below water pumped** — per hour and per day alike. Earlier versions weighted each drop by the raw per-hour steps instead. That gave a hard zero to every hour whose level happened to read flat, and it double-counted a pump cycle whenever the log timestamp and the level drop fell into adjacent hourly buckets.
+
+Two consequences worth knowing: very slow consumption is registered in steps once it breaks through the band, so individual days are chunkier than a weekly total; and at most one deadband's worth (0.3 L) can be pending at the end of the window. That residual is bounded — it does not grow with the window length.
 
 A third filter sits further upstream: an **IQR filter** drops statistical outliers among the per-minute readings before the hourly mean is written to `water_level`.
 

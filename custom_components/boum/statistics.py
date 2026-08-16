@@ -213,11 +213,16 @@ def import_statistics(
     hourly_telemetry: dict,
     tank_type: str = DEFAULT_TANK_TYPE,
     device_model: str = DEFAULT_DEVICE_MODEL,
-) -> None:
+) -> dict[datetime, float]:
     """Import hourly telemetry as HA long-term statistics.
 
     The caller is responsible for passing only the data that needs importing
     (incremental fetch). All points in hourly_telemetry are pushed.
+
+    Returns the water level buckets (hour → litres) written in this call, so
+    the caller can feed them straight into the consumption calculation.
+    Reading them back from the recorder instead would miss the newest hours
+    until the following poll.
     """
     wl_transform: Callable[[float], float] = lambda x: _tank_wl(
         x, tank_type, device_model
@@ -226,6 +231,7 @@ def import_statistics(
     time_series = hourly_telemetry.get("timeSeries", {})
     short_id = device_id[:8]
     imported = 0
+    water_level_by_hour: dict[datetime, float] = {}
 
     for api_key, id_suffix, display_name, unit in _STAT_FIELDS:
         series = time_series.get(api_key, [])
@@ -239,6 +245,8 @@ def import_statistics(
         )
         if not stats:
             continue
+        if id_suffix == "water_level":
+            water_level_by_hour = {s["start"]: s["mean"] for s in stats}
         meta = StatisticMetaData(
             **_MEAN_KWARGS,
             has_sum=False,
@@ -257,3 +265,4 @@ def import_statistics(
         imported,
         len(_STAT_FIELDS),
     )
+    return water_level_by_hour
