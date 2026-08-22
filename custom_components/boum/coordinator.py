@@ -83,9 +83,9 @@ def _compute_hourly_usage(
     return calculate_water_usage_from_level(points, pumped_by_hour=complete_pumped)
 
 
-def _last_pump_from_log(log_entries: list[dict]) -> datetime | None:
-    """Return the exact timestamp of the most recent pumpStopped log event."""
-    return max((ts for ts, _ in iter_pump_events(log_entries)), default=None)
+def _last_pump_from_log(log_entries: list[dict]) -> tuple[datetime, float] | None:
+    """Return timestamp and volume of the most recent pumpStopped log event."""
+    return max(iter_pump_events(log_entries), default=None)
 
 
 def latest_value(time_series: dict, key: str) -> float | None:
@@ -258,10 +258,14 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
 
                 device_log = await self.api.get_device_log(device_id)
 
-                # Last irrigation: exact timestamp from pumpStopped log event.
-                # Falls back to water_pumped statistics (60-day window) when
-                # the log window does not cover the most recent pump cycle.
-                last_irrigation = _last_pump_from_log(device_log)
+                # Last irrigation: exact timestamp and volume from the newest
+                # pumpStopped log event.  The timestamp falls back to
+                # water_pumped statistics (60-day window) when the log window
+                # does not cover the most recent pump cycle; the volume has no
+                # fallback, since the statistics only hold hourly sums.
+                last_pump = _last_pump_from_log(device_log)
+                last_irrigation = last_pump[0] if last_pump else None
+                last_pumped_volume = last_pump[1] if last_pump else None
                 if last_irrigation is None:
                     last_irrigation = await self._async_get_last_irrigation(device_id)
 
@@ -285,6 +289,7 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
                     "minutely": minutely,
                     "hourly": hourly,
                     "last_irrigation": last_irrigation,
+                    "last_pumped_volume": last_pumped_volume,
                     "hass_stats": hass_stats,
                 }
                 try:

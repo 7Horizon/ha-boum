@@ -137,6 +137,7 @@ async def async_setup_entry(
             BoumSensor(coordinator, device_id, desc) for desc in SENSOR_DESCRIPTIONS
         )
         entities.append(BoumLastIrrigationSensor(coordinator, device_id))
+        entities.append(BoumLastPumpedSensor(coordinator, device_id))
         entities.append(Boum24hVolumeSensor(coordinator, device_id, "water_usage", "mdi:water-circle"))
         entities.append(
             Boum24hVolumeSensor(
@@ -245,6 +246,38 @@ class BoumLastIrrigationSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self) -> datetime | None:
         return self.coordinator.data.get(self._device_id, {}).get("last_irrigation")
+
+
+class BoumLastPumpedSensor(CoordinatorEntity, SensorEntity):
+    """Volume of the most recent pump cycle, straight from the device log.
+
+    Counterpart to Last Irrigation — same pumpStopped event, the volume
+    instead of the timestamp.  Unlike Water Pumped this carries no hour
+    bucketing, so a cycle shows up on the next poll rather than once its hour
+    has completed.  Reports None while the log holds no pump event at all;
+    there is no statistics fallback, because those only keep hourly sums and
+    cannot say what a single cycle delivered.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "last_pumped"
+    _attr_native_unit_of_measurement = UnitOfVolume.LITERS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 2
+    _attr_icon = "mdi:water-pump"
+
+    def __init__(self, coordinator: BoumCoordinator, device_id: str) -> None:
+        super().__init__(coordinator)
+        self._device_id = device_id
+        self._attr_unique_id = f"{DOMAIN}_{device_id}_last_pumped"
+        self._attr_device_info = _device_info(device_id, _device_name(coordinator, device_id))
+
+    @property
+    def native_value(self) -> float | None:
+        volume = self.coordinator.data.get(self._device_id, {}).get(
+            "last_pumped_volume"
+        )
+        return round(volume, 2) if volume is not None else None
 
 
 class Boum24hVolumeSensor(CoordinatorEntity, SensorEntity):

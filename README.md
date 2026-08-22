@@ -102,9 +102,22 @@ Data source: HA long-term statistics (`boum:<id>_water_usage`).
 ### Water Pumped
 **Unit:** L
 
-Total water delivered by the irrigation pump in the last 24 complete hours. Derived from `pumpStopped` events in the device log (`GET /devices/{id}/log`), which report the exact volume measured per pump cycle (`payload.totalPumpedVolume`). Multiple cycles within the same hour are summed. The window is aligned to hour boundaries and the current (still-running) hour is excluded, so the value changes at most once per hour.
+Total water delivered by the irrigation pump in the last 24 complete hours. Derived from `pumpStopped` events in the device log (`GET /devices/{id}/log`), which report the exact volume measured per pump cycle (`payload.totalPumpedVolume`). Multiple cycles within the same hour are summed. The window is aligned to hour boundaries and the current (still-running) hour is excluded, so the value changes at most once per hour. Hourly buckets cannot be dropped from a window partially, and Water Usage has to use the same window for the lower bound above to hold — so a fresh cycle takes up to an hour plus one poll to appear here. Use [Last Pumped](#last-pumped) for the value that updates right away.
 
 Data source: HA long-term statistics (`boum:<id>_water_pumped`).
+
+---
+
+### Last Pumped
+**Unit:** L
+
+The volume the most recent pump cycle delivered, taken from the `payload.totalPumpedVolume` field of the newest `pumpStopped` event in the device log.
+
+Counterpart to Last Irrigation — same log event, the volume instead of the timestamp. Unlike Water Pumped this value has no hour bucketing: it appears on the next poll (within 15 minutes) instead of waiting for its hour to complete, which makes it the value to watch right after an irrigation run.
+
+Reports unknown while the device log holds no pump event at all. There is no statistics fallback, because those only keep hourly sums and cannot say what an individual cycle delivered.
+
+Data source: device log (`GET /devices/{id}/log`).
 
 ---
 
@@ -221,7 +234,7 @@ The coordinator polls the Boum API every **15 minutes**. Five requests are made 
 - **Hourly data** (`interval=3600s`, incremental) — only data since the last known statistic is fetched and written to HA long-term statistics. On first install this backfills 7 days of history; on subsequent polls it typically covers 1–2 hours.
 - **Device log** (`GET /devices/{id}/log`) — recent device events; `pumpStopped` entries are used to compute the `water_pumped` statistic.
 
-Water Usage, Water Pumped, Days Remaining, and the forecast are calculated from HA long-term statistics. Last Irrigation is resolved from the device log first, falling back to statistics for older history.
+Water Usage, Water Pumped, Days Remaining, and the forecast are calculated from HA long-term statistics. Last Pumped comes from the device log only; Last Irrigation is resolved from the log first, falling back to statistics for older history.
 
 ---
 
