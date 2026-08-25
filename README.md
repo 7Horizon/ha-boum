@@ -82,14 +82,10 @@ Consumption is therefore tracked against a **confirmed baseline**:
 1. **Rolling median (3 h)** over the hourly levels — removes single-hour outliers such as the lid-open artefact.
 2. **Deadband (± 0.3 L)** around the baseline — movements inside the band are treated as sensor artefacts and ignored. This is where noise and thermal drift are absorbed.
 3. **Confirmed drops** beyond the band are booked as consumption and pull the baseline down. **Confirmed rises** are inflow — rain entering through the lid, or a refill — and only move the baseline up; they never cancel consumption booked earlier. Because inflow and outflow are processed in sequence rather than netted against each other, slow rain cannot mask real consumption.
-4. Each confirmed drop is **spread evenly over the hours it spans**. This establishes how much the tank lost per day; where within the day it went is decided in the next step.
+4. Each confirmed drop is **spread evenly over the hours it spans**, establishing how much the tank lost per day.
+5. That daily loss is **flattened into an even hourly rate** for the day. Everything leaving the tank — evaporation, seepage, irrigation alike — is far too slow to break the deadband inside a single hour, so hour-level timing is not in the level data to begin with. What the tracker does establish reliably is the total per day. Flattening keeps that total exactly as measured and leaves no hour at zero merely because it sits between two confirmed drops.
 
-The daily loss is then **attributed to the two processes that cause it**, because only one of them is observable per hour:
-
-- The **pump log** reports both the volume and the moment, to the second. That water is booked on the hour it was pumped in.
-- **Evaporation and seepage** run continuously and are far too slow to break the deadband within a single hour, so their timing is simply not in the data. Whatever the day lost beyond the pumped volume becomes an even background rate across that day.
-
-A day therefore ends up at `max(measured loss, pumped volume)`, which means **water usage can never come out below water pumped** — per hour and per day alike. Earlier versions weighted each drop by the raw per-hour steps instead. That gave a hard zero to every hour whose level happened to read flat, and it double-counted a pump cycle whenever the log timestamp and the level drop fell into adjacent hourly buckets.
+**The pump log is deliberately not an input here.** It would supply exact timing, but the volumes the API reports for it are not trustworthy — currently far too high — and anything derived from them would drag the measured consumption along. Water Usage is purely what the tank level shows. Earlier versions used the pumped volume as a per-hour lower bound; that inflated consumption whenever the reported volume was wrong, and double-counted a cycle whenever the log timestamp and the level drop fell into adjacent hourly buckets.
 
 Two consequences worth knowing: very slow consumption is registered in steps once it breaks through the band, so individual days are chunkier than a weekly total; and at most one deadband's worth (0.3 L) can be pending at the end of the window. That residual is bounded — it does not grow with the window length.
 
@@ -102,7 +98,9 @@ Data source: HA long-term statistics (`boum:<id>_water_usage`).
 ### Water Pumped
 **Unit:** L
 
-Total water delivered by the irrigation pump in the last 24 complete hours. Derived from `pumpStopped` events in the device log (`GET /devices/{id}/log`), which report the exact volume measured per pump cycle (`payload.totalPumpedVolume`). Multiple cycles within the same hour are summed. The window is aligned to hour boundaries and the current (still-running) hour is excluded, so the value changes at most once per hour. Hourly buckets cannot be dropped from a window partially, and Water Usage has to use the same window for the lower bound above to hold — so a fresh cycle takes up to an hour plus one poll to appear here. Use [Last Pumped](#last-pumped) for the value that updates right away.
+Total water delivered by the irrigation pump in the last 24 complete hours. Derived from `pumpStopped` events in the device log (`GET /devices/{id}/log`), which report the exact volume measured per pump cycle (`payload.totalPumpedVolume`). Multiple cycles within the same hour are summed. The window is aligned to hour boundaries and the current (still-running) hour is excluded, so the value changes at most once per hour — hourly buckets cannot be dropped from a window partially. A fresh cycle therefore takes up to an hour plus one poll to appear here; use [Last Pumped](#last-pumped) for the value that updates right away.
+
+> **Accuracy caveat:** the volumes the API reports per cycle currently come out considerably too high. Treat this sensor and Last Pumped as indicative until that is resolved. Neither feeds Water Usage, Days Remaining or the forecast — those are derived from the tank level alone, so an inflated pump reading cannot distort them.
 
 Data source: HA long-term statistics (`boum:<id>_water_pumped`).
 
@@ -241,7 +239,7 @@ Water Usage, Water Pumped, Days Remaining, and the forecast are calculated from 
 ## Notes
 
 - The Boum API does not expose the device model (Boum 2 / Boum 3 / Boum Core) or tank size. You must configure these manually during setup; otherwise the water level calculation will be inaccurate.
-- Flow rate is not tracked. Pump volume is measured precisely by the device firmware and reported as a `pumpStopped` log event after each cycle; this is more accurate than a flow-rate estimate and requires no separate sensor.
+- Flow rate is not tracked. The device firmware measures the volume of each pump cycle itself and reports it as a `pumpStopped` log event, which needs no separate sensor — but the reported figures currently run considerably too high, so Water Pumped and Last Pumped are indicative rather than exact. Consumption is measured from the tank level and does not depend on them.
 - The ultrasonic level reading is not perfectly stable: lifting the controller lid produces isolated false readings, and the speed of sound drifts with air temperature over the course of a day. Neither reaches the consumption or forecast calculations — see [Water Usage](#water-usage) for how they are filtered out.
 - Rain can enter the tank through the lid, usually as a small amount over a long period. Such inflow raises the tracked baseline instead of being netted against consumption, so it does not make Water Usage look artificially low.
 - This is an unofficial integration and is not affiliated with or endorsed by Boum.

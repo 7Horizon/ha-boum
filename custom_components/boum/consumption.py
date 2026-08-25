@@ -42,7 +42,7 @@ def _spread_drop(
     most hours, and it was the main source of the isolated zeros in the hourly
     series.  Those steps are noise at this scale anyway; what the tracker
     actually establishes is that *total* litres left the tank somewhere within
-    the span.  Where exactly comes from the pump log in _attribute_by_day.
+    the span, not which hour of it.
     """
     span = hours[start:end]
     if not span:
@@ -52,53 +52,39 @@ def _spread_drop(
         usage[hour] += share
 
 
-def _attribute_by_day(
+def _smooth_over_days(
     loss_by_hour: dict[datetime, float],
-    pumped_by_hour: dict[datetime, float],
-    first_hour: datetime,
-    last_hour: datetime,
 ) -> dict[datetime, float]:
-    """Split the measured level loss into pumped water and a background rate.
+    """Flatten each day's measured loss into an even hourly rate.
 
-    The tank loses water through two very differently timed processes, and only
-    one of them is observable per hour:
+    Evaporation, seepage and irrigation all leave the tank far too slowly to
+    break the deadband inside a single hour, so the hour-level timing of a loss
+    is not in the level data to begin with.  What the tracker does establish
+    reliably is the total per day.  Spreading that total evenly over the day
+    keeps the daily figures — the ones the forecast trains on — exactly as
+    measured, and gives every hour a share instead of leaving the hours between
+    two confirmed drops at zero.
 
-      * The pump reports both the volume and the moment, to the second.  That
-        water is booked on its own hour.
-      * Evaporation and seepage run continuously and are far too slow to break
-        the deadband within an hour.  Their timing is simply not in the data,
-        so the remainder of a day's loss is spread evenly over that day.
-
-    Grouping per day rather than per drop keeps the daily totals — the figures
-    the forecast trains on — exactly as measured, while giving every hour a
-    non-zero background share.  A day ends up at max(measured loss, pumped),
-    so consumption can never come out below what the pump moved, per hour and
-    per day alike.
+    The pump log is deliberately not consulted here.  It would supply exact
+    timing, but its volumes cannot be trusted (the API reports them far too
+    high), and anything derived from them would pull the measured consumption
+    with it.  Water Usage is therefore purely what the tank level shows.
     """
     hours_by_day: defaultdict[date, list[datetime]] = defaultdict(list)
     for hour in loss_by_hour:
         hours_by_day[hour.date()].append(hour)
-    # Hours the pump reports but the level series has no reading for: one the
-    # device slept through, or the newest complete hour, which has no successor
-    # and can therefore never carry a level drop.
-    for hour in pumped_by_hour:
-        if first_hour <= hour <= last_hour and hour not in loss_by_hour:
-            hours_by_day[hour.date()].append(hour)
 
     usage: dict[datetime, float] = {}
     for day_hours in hours_by_day.values():
-        day_loss = sum(loss_by_hour.get(hour, 0.0) for hour in day_hours)
-        day_pumped = sum(pumped_by_hour.get(hour, 0.0) for hour in day_hours)
-        background = max(0.0, day_loss - day_pumped) / len(day_hours)
+        share = sum(loss_by_hour[hour] for hour in day_hours) / len(day_hours)
         for hour in day_hours:
-            usage[hour] = pumped_by_hour.get(hour, 0.0) + background
+            usage[hour] = share
     return usage
 
 
 def calculate_water_usage_from_level(
     readings: list[tuple[datetime, float]],
     *,
-    pumped_by_hour: dict[datetime, float] | None = None,
     deadband_l: float = 0.3,
     smoothing_hours: int = 3,
 ) -> dict[datetime, float]:
@@ -122,9 +108,9 @@ def calculate_water_usage_from_level(
          consumption booked earlier.
       4. Each confirmed drop is spread evenly over the hours it spans, which
          establishes how much the tank lost on each day.
-      5. That daily loss is then attributed: the pump log places its volumes on
-         the exact hours they ran in, the rest becomes an even background rate
-         for the day (see _attribute_by_day).
+      5. That daily loss is flattened into an even hourly rate for the day, so
+         no hour is left at zero just because it sits between two confirmed
+         drops (see _smooth_over_days).
 
     Because inflow and outflow are processed in sequence rather than netted
     against each other, slow rain does not mask real consumption.
@@ -133,12 +119,6 @@ def calculate_water_usage_from_level(
     ----------
     readings:
         List of (hour, water_level_liters) pairs.
-    pumped_by_hour:
-        Optional per-hour pump volumes.  Used both to time the pumped share of
-        a confirmed drop and as a hard lower bound per hour, so water the pump
-        demonstrably moved counts as consumed even when simultaneous inflow
-        kept the level flat.  The caller is responsible for passing only
-        complete hours.
     deadband_l:
         Half-width of the band around the baseline that is treated as sensor
         artefact rather than a real level change.
@@ -148,7 +128,6 @@ def calculate_water_usage_from_level(
     if len(readings) < 2:
         return {}
 
-    pumped = pumped_by_hour or {}
     pts = sorted(readings, key=lambda r: r[0])
     hours = [ts for ts, _ in pts]
     levels = _rolling_median([v for _, v in pts], smoothing_hours)
@@ -168,7 +147,7 @@ def calculate_water_usage_from_level(
         baseline = levels[i]
         anchor = i
 
-    return _attribute_by_day(loss, pumped, hours[0], hours[-1])
+    return _smooth_over_days(loss)
 
 
 def iter_pump_events(log_entries: list[dict]) -> Iterator[tuple[datetime, float]]:

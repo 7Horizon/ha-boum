@@ -60,15 +60,17 @@ def _to_datetime(ts) -> datetime | None:
 
 def _compute_hourly_usage(
     water_level: dict[datetime, float],
-    pumped_by_hour: dict[datetime, float] | None = None,
 ) -> dict[datetime, float]:
     """Return hourly water consumption (L) from the water level history.
 
-    Only completed hours are used — for the level *and* for the pump volumes:
-    the running hour's mean still drifts with every refresh, which would make
-    the newest bucket — and with it the 24 h sensor sum — jitter between
-    refreshes.  The actual work (median smoothing, baseline tracking, pump
-    attribution) happens in calculate_water_usage_from_level.
+    Only completed hours are used: the running hour's mean still drifts with
+    every refresh, which would make the newest bucket — and with it the 24 h
+    sensor sum — jitter between refreshes.  The actual work (median smoothing,
+    baseline tracking, daily smoothing) happens in
+    calculate_water_usage_from_level.
+
+    The pump log is not an input.  Consumption is what the tank level shows,
+    independent of the volumes the API reports for the pump.
     """
     current_hour = datetime.now(timezone.utc).replace(
         minute=0, second=0, microsecond=0
@@ -77,10 +79,7 @@ def _compute_hourly_usage(
     if len(complete) < 2:
         return {}
     points = sorted(complete.items(), key=lambda p: p[0])
-    complete_pumped = {
-        ts: v for ts, v in (pumped_by_hour or {}).items() if ts < current_hour
-    }
-    return calculate_water_usage_from_level(points, pumped_by_hour=complete_pumped)
+    return calculate_water_usage_from_level(points)
 
 
 def _last_pump_from_log(log_entries: list[dict]) -> tuple[datetime, float] | None:
@@ -270,10 +269,10 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
                     last_irrigation = await self._async_get_last_irrigation(device_id)
 
                 # Merge the pump volumes the log reports right now over the
-                # stored statistic.  The consumption calculation has to see the
-                # cycles of the last hour, which are not in the statistics yet;
-                # max() keeps a stored value that the log window has already
-                # scrolled past.
+                # stored statistic, so the Water Pumped sensor does not trail a
+                # poll behind.  max() keeps a stored value that the log window
+                # has already scrolled past.  This feeds the sensor only —
+                # Water Usage no longer depends on it.
                 pumped_since = (
                     max(hass_stats["water_pumped"])
                     if hass_stats.get("water_pumped")
@@ -311,7 +310,7 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
 
                 usage_by_hour: dict[datetime, float] = {}
                 try:
-                    usage_by_hour = _compute_hourly_usage(level_by_hour, pumped_by_hour)
+                    usage_by_hour = _compute_hourly_usage(level_by_hour)
                     await import_water_usage_statistics(self.hass, device_id, usage_by_hour)
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.warning("Water usage statistics import failed for %s: %s", device_id, err)
@@ -325,10 +324,9 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.warning("Water pumped statistics import failed for %s: %s", device_id, err)
 
-                # Hand the sensors this poll's numbers instead of the ones read
-                # from the recorder at the top of it — otherwise the water
-                # usage sensor trails the water pumped sensor by a full cycle
-                # and can read lower than it.
+                # Hand the sensors this poll's numbers instead of the ones
+                # read from the recorder at the top of it, so both volume
+                # sensors reflect the same poll.
                 hass_stats["water_level"] = level_by_hour
                 hass_stats["water_pumped"] = pumped_by_hour
                 hass_stats["water_usage"] = {
