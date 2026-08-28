@@ -6,7 +6,7 @@ Unofficial Home Assistant integration for the [Boum](https://boum.garden) smart 
 
 ## Prerequisites
 
-- **Home Assistant** 2024.11 or newer
+- **Home Assistant** 2026.3 or newer
 - A **Boum account** with at least one claimed device
 - For weather-based prediction: the **OpenWeatherMap** integration configured in HA (`weather.openweathermap`)
 
