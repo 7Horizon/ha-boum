@@ -137,8 +137,13 @@ async def async_setup_entry(
             BoumSensor(coordinator, device_id, desc) for desc in SENSOR_DESCRIPTIONS
         )
         entities.append(BoumLastIrrigationSensor(coordinator, device_id))
+        entities.append(BoumLastPumpedSensor(coordinator, device_id))
         entities.append(Boum24hVolumeSensor(coordinator, device_id, "water_usage", "mdi:water-circle"))
-        entities.append(Boum24hVolumeSensor(coordinator, device_id, "water_pumped", "mdi:pump"))
+        entities.append(
+            Boum24hVolumeSensor(
+                coordinator, device_id, "water_pumped", "mdi:pump", empty_window_value=0.0
+            )
+        )
         entities.append(BoumDaysRemainingSensor(coordinator, device_id))
         entities.append(BoumWaterForecastSensor(coordinator, device_id))
     async_add_entities(entities)
@@ -166,7 +171,11 @@ def _device_name(coordinator: BoumCoordinator, device_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 class BoumWaterLevelSensor(CoordinatorEntity, SensorEntity):
-    """Water level in litres using the tank-specific formula from config."""
+    """Water level in litres using the tank-specific formula from config.
+
+    Reports the 30-minute median of the per-minute readings (see
+    coordinator.current_level) at 0.1 L resolution to keep the curve calm.
+    """
 
     _attr_has_entity_name = True
     _attr_translation_key = "water_level"
@@ -188,7 +197,7 @@ class BoumWaterLevelSensor(CoordinatorEntity, SensorEntity):
             self.coordinator.tank_type(self._device_id),
             self.coordinator.device_model(self._device_id),
         )
-        return round(level, 2) if level is not None else None
+        return round(level, 1) if level is not None else None
 
 
 class BoumSensor(CoordinatorEntity, SensorEntity):
@@ -239,14 +248,51 @@ class BoumLastIrrigationSensor(CoordinatorEntity, SensorEntity):
         return self.coordinator.data.get(self._device_id, {}).get("last_irrigation")
 
 
+class BoumLastPumpedSensor(CoordinatorEntity, SensorEntity):
+    """Volume of the most recent pump cycle, straight from the device log.
+
+    Counterpart to Last Irrigation — same pumpStopped event, the volume
+    instead of the timestamp.  Unlike Water Pumped this carries no hour
+    bucketing, so a cycle shows up on the next poll rather than once its hour
+    has completed.  Reports None while the log holds no pump event at all;
+    there is no statistics fallback, because those only keep hourly sums and
+    cannot say what a single cycle delivered.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "last_pumped"
+    _attr_native_unit_of_measurement = UnitOfVolume.LITERS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 2
+    _attr_icon = "mdi:water-pump"
+
+    def __init__(self, coordinator: BoumCoordinator, device_id: str) -> None:
+        super().__init__(coordinator)
+        self._device_id = device_id
+        self._attr_unique_id = f"{DOMAIN}_{device_id}_last_pumped"
+        self._attr_device_info = _device_info(device_id, _device_name(coordinator, device_id))
+
+    @property
+    def native_value(self) -> float | None:
+        volume = self.coordinator.data.get(self._device_id, {}).get(
+            "last_pumped_volume"
+        )
+        return round(volume, 2) if volume is not None else None
+
+
 class Boum24hVolumeSensor(CoordinatorEntity, SensorEntity):
     """Sum of an hourly volume statistic over the last 24 complete hours.
 
-    Instantiated for water_usage (tank level drops, spike-filtered — basis for
-    Days Remaining and the weather forecast) and water_pumped (exact pump
+    Instantiated for water_usage (baseline-tracked tank level drops — basis
+    for Days Remaining and the weather forecast) and water_pumped (exact pump
     volume from pumpStopped log events).  The window is aligned to hour
     boundaries and excludes the still-running hour, so the value changes at
     most once per hour instead of jittering with every refresh.
+
+    empty_window_value is returned when the statistic exists but has no rows
+    in the 24 h window: 0.0 for water_pumped (sparse statistic — no rows
+    simply means the pump was idle), None for water_usage (dense statistic —
+    no rows means missing data).
     """
 
     _attr_has_entity_name = True
@@ -254,11 +300,18 @@ class Boum24hVolumeSensor(CoordinatorEntity, SensorEntity):
     _attr_state_class = SensorStateClass.MEASUREMENT
 
     def __init__(
-        self, coordinator: BoumCoordinator, device_id: str, stat_key: str, icon: str
+        self,
+        coordinator: BoumCoordinator,
+        device_id: str,
+        stat_key: str,
+        icon: str,
+        *,
+        empty_window_value: float | None = None,
     ) -> None:
         super().__init__(coordinator)
         self._device_id = device_id
         self._stat_key = stat_key
+        self._empty_window_value = empty_window_value
         self._attr_translation_key = stat_key
         self._attr_icon = icon
         self._attr_unique_id = f"{DOMAIN}_{device_id}_{stat_key}"
@@ -281,7 +334,7 @@ class Boum24hVolumeSensor(CoordinatorEntity, SensorEntity):
         cutoff = current_hour - timedelta(hours=24)
 
         values = [val for ts, val in hourly.items() if cutoff <= ts < current_hour]
-        return round(sum(values), 1) if values else None
+        return round(sum(values), 1) if values else self._empty_window_value
 
 
 class BoumDaysRemainingSensor(CoordinatorEntity, SensorEntity):

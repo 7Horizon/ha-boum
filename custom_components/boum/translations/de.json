@@ -79,6 +79,7 @@
       "water_usage":       { "name": "Wasserverbrauch" },
       "water_pumped":      { "name": "Gepumptes Wasser" },
       "last_irrigation":   { "name": "Letzte Bewässerung" },
+      "last_pumped":       { "name": "Zuletzt gepumpt" },
       "days_remaining":   { "name": "Wasser reicht noch" },
       "days_until_empty": { "name": "Wasser reicht noch (Wetter)" }
     }

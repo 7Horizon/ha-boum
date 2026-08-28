@@ -79,6 +79,7 @@
       "water_usage":       { "name": "Water Usage" },
       "water_pumped":      { "name": "Water Pumped" },
       "last_irrigation":   { "name": "Last Irrigation" },
+      "last_pumped":       { "name": "Last Pumped" },
       "days_remaining":   { "name": "Days Remaining" },
       "days_until_empty": { "name": "Days Remaining (Forecast)" }
     }

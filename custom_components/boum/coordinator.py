@@ -61,14 +61,16 @@ def _to_datetime(ts) -> datetime | None:
 def _compute_hourly_usage(
     water_level: dict[datetime, float],
 ) -> dict[datetime, float]:
-    """Return hourly water consumption (L) using the Boum level-based algorithm.
+    """Return hourly water consumption (L) from the water level history.
 
     Only completed hours are used: the running hour's mean still drifts with
     every refresh, which would make the newest bucket — and with it the 24 h
-    sensor sum — jitter between refreshes.  Applies filter_level_spikes first
-    (lid-open artefacts), then delegates to calculate_water_usage_from_level
-    which mirrors the original Boum app logic: noise gate + per-hour drop
-    accumulation.
+    sensor sum — jitter between refreshes.  The actual work (median smoothing,
+    baseline tracking, daily smoothing) happens in
+    calculate_water_usage_from_level.
+
+    The pump log is not an input.  Consumption is what the tank level shows,
+    independent of the volumes the API reports for the pump.
     """
     current_hour = datetime.now(timezone.utc).replace(
         minute=0, second=0, microsecond=0
@@ -77,44 +79,12 @@ def _compute_hourly_usage(
     if len(complete) < 2:
         return {}
     points = sorted(complete.items(), key=lambda p: p[0])
-    points = filter_level_spikes(points)
     return calculate_water_usage_from_level(points)
 
 
-def filter_level_spikes(
-    points: list[tuple[datetime, float]],
-    min_drop: float = 1.0,
-) -> list[tuple[datetime, float]]:
-    """Replace spike readings caused by the ultrasonic sensor seeing the open lid.
-
-    A spike is detected when the level drops by at least *min_drop* litres AND the
-    next reading recovers by at least 50 % of that drop.  The spike value is
-    replaced with the average of its two neighbours so that drop-based consumption
-    calculations ignore the artefact.  The recovery condition makes this safe: real
-    consumption (pump cycles) does not recover, so genuine usage is never removed.
-    Handles single-hour spikes only; multi-hour lid-open periods are covered by the
-    per-minute IQR filter in statistics.py.
-    """
-    if len(points) < 3:
-        return points
-    result = [points[0]]
-    for i in range(1, len(points) - 1):
-        prev_val = result[-1][1]
-        curr_ts, curr_val = points[i]
-        next_val = points[i + 1][1]
-        drop = prev_val - curr_val
-        recovery = next_val - curr_val
-        if drop >= min_drop and recovery >= drop * 0.5:
-            result.append((curr_ts, (prev_val + next_val) / 2))
-        else:
-            result.append(points[i])
-    result.append(points[-1])
-    return result
-
-
-def _last_pump_from_log(log_entries: list[dict]) -> datetime | None:
-    """Return the exact timestamp of the most recent pumpStopped log event."""
-    return max((ts for ts, _ in iter_pump_events(log_entries)), default=None)
+def _last_pump_from_log(log_entries: list[dict]) -> tuple[datetime, float] | None:
+    """Return timestamp and volume of the most recent pumpStopped log event."""
+    return max(iter_pump_events(log_entries), default=None)
 
 
 def latest_value(time_series: dict, key: str) -> float | None:
@@ -130,15 +100,53 @@ def latest_value(time_series: dict, key: str) -> float | None:
     return None
 
 
+_LEVEL_MEDIAN_WINDOW = timedelta(minutes=30)
+
+
+def _median_raw_level(series: list[dict]) -> float | None:
+    """Median waterTableRange (cm) over the last 30 min of per-minute readings.
+
+    The median suppresses ultrasonic measurement jitter and is robust against
+    single outlier readings (lid open at poll time).  The window is anchored
+    to the newest reading rather than the wall clock so it still works when
+    the device sleeps and the data lags behind.
+    """
+    points: list[tuple[datetime, float]] = []
+    for point in series:
+        ts = _to_datetime(point.get("x"))
+        v = point.get("y")
+        if ts is None or v is None:
+            continue
+        try:
+            points.append((ts, float(v)))
+        except (TypeError, ValueError):
+            continue
+    if not points:
+        return None
+    newest = max(ts for ts, _ in points)
+    window = sorted(v for ts, v in points if ts >= newest - _LEVEL_MEDIAN_WINDOW)
+    mid = len(window) // 2
+    if len(window) % 2:
+        return window[mid]
+    return (window[mid - 1] + window[mid]) / 2
+
+
 def current_level(device_data: dict, tank_type: str, device_model: str) -> float | None:
-    """Return current water level in litres from coordinator device data."""
-    for data_key in ("minutely", "hourly"):
+    """Return current water level in litres from coordinator device data.
+
+    Uses the 30-minute median of the per-minute readings; falls back to the
+    latest hourly value when no minutely data is available.
+    """
+    raw = _median_raw_level(
+        device_data.get("minutely", {}).get("timeSeries", {}).get("waterTableRange", [])
+    )
+    if raw is None:
         raw = latest_value(
-            device_data.get(data_key, {}).get("timeSeries", {}), "waterTableRange"
+            device_data.get("hourly", {}).get("timeSeries", {}), "waterTableRange"
         )
-        if raw is not None:
-            return water_level_liters(raw, tank_type, device_model)
-    return None
+    if raw is None:
+        return None
+    return water_level_liters(raw, tank_type, device_model)
 
 
 def _stat_rows(stats: dict, stat_id: str):
@@ -249,12 +257,30 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
 
                 device_log = await self.api.get_device_log(device_id)
 
-                # Last irrigation: exact timestamp from pumpStopped log event.
-                # Falls back to water_pumped statistics (60-day window) when
-                # the log window does not cover the most recent pump cycle.
-                last_irrigation = _last_pump_from_log(device_log)
+                # Last irrigation: exact timestamp and volume from the newest
+                # pumpStopped log event.  The timestamp falls back to
+                # water_pumped statistics (60-day window) when the log window
+                # does not cover the most recent pump cycle; the volume has no
+                # fallback, since the statistics only hold hourly sums.
+                last_pump = _last_pump_from_log(device_log)
+                last_irrigation = last_pump[0] if last_pump else None
+                last_pumped_volume = last_pump[1] if last_pump else None
                 if last_irrigation is None:
                     last_irrigation = await self._async_get_last_irrigation(device_id)
+
+                # Merge the pump volumes the log reports right now over the
+                # stored statistic, so the Water Pumped sensor does not trail a
+                # poll behind.  max() keeps a stored value that the log window
+                # has already scrolled past.  This feeds the sensor only —
+                # Water Usage no longer depends on it.
+                pumped_since = (
+                    max(hass_stats["water_pumped"])
+                    if hass_stats.get("water_pumped")
+                    else None
+                )
+                pumped_by_hour = dict(hass_stats.get("water_pumped", {}))
+                for hour, volume in calculate_water_pumped_from_log(device_log).items():
+                    pumped_by_hour[hour] = max(pumped_by_hour.get(hour, 0.0), volume)
 
                 result[device_id] = {
                     "name": device_name,
@@ -262,10 +288,11 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
                     "minutely": minutely,
                     "hourly": hourly,
                     "last_irrigation": last_irrigation,
+                    "last_pumped_volume": last_pumped_volume,
                     "hass_stats": hass_stats,
                 }
                 try:
-                    import_statistics(
+                    fresh_levels = import_statistics(
                         self.hass,
                         device_id,
                         hourly,
@@ -274,20 +301,38 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
                     )
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.warning("Statistics import failed for %s: %s", device_id, err)
+                    fresh_levels = {}
 
+                # hass_stats was read before the import above, so on its own it
+                # lags one poll behind and the newest hourly buckets would be
+                # missing from the consumption calculation.
+                level_by_hour = {**hass_stats.get("water_level", {}), **fresh_levels}
+
+                usage_by_hour: dict[datetime, float] = {}
                 try:
-                    usage_by_hour = _compute_hourly_usage(hass_stats.get("water_level", {}))
+                    usage_by_hour = _compute_hourly_usage(level_by_hour)
                     await import_water_usage_statistics(self.hass, device_id, usage_by_hour)
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.warning("Water usage statistics import failed for %s: %s", device_id, err)
 
                 try:
-                    pumped_stats = hass_stats.get("water_pumped", {})
-                    since = (max(pumped_stats.keys()) if pumped_stats else None)
-                    pumped_by_hour = calculate_water_pumped_from_log(device_log, since=since)
-                    await import_water_pumped_statistics(self.hass, device_id, pumped_by_hour)
+                    await import_water_pumped_statistics(
+                        self.hass,
+                        device_id,
+                        calculate_water_pumped_from_log(device_log, since=pumped_since),
+                    )
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.warning("Water pumped statistics import failed for %s: %s", device_id, err)
+
+                # Hand the sensors this poll's numbers instead of the ones
+                # read from the recorder at the top of it, so both volume
+                # sensors reflect the same poll.
+                hass_stats["water_level"] = level_by_hour
+                hass_stats["water_pumped"] = pumped_by_hour
+                hass_stats["water_usage"] = {
+                    **hass_stats.get("water_usage", {}),
+                    **usage_by_hour,
+                }
             except BoumApiError as err:
                 raise UpdateFailed(
                     f"Error fetching data for device {device_id}: {err}"
@@ -450,14 +495,24 @@ class BoumCoordinator(DataUpdateCoordinator[dict]):
         return days
 
     async def _async_get_daily_consumption(self, device_id: str) -> dict[date, float]:
-        """Return daily water usage (L) from water_usage HA statistics (tank level drops)."""
+        """Return daily water usage (L) from water_usage HA statistics (tank level drops).
+
+        Days without any consumption are kept with a total of 0.0 — they are
+        genuine training examples ("this warm, still nothing used"), and
+        dropping them would train the forecast on irrigation days only and
+        inflate every prediction.  Today is excluded because a partial day
+        pairs a partial total with a full-day temperature.
+        """
         stat_id = f"{DOMAIN}:{device_id[:8]}_water_usage"
-        start = datetime.now(timezone.utc) - timedelta(days=30)
+        midnight = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        start = midnight - timedelta(days=30)
 
         stats = await self._async_stats_during_period(start, {stat_id})
         daily: defaultdict[date, float] = defaultdict(float)
         for ts, mean in _stat_rows(stats, stat_id):
-            if mean > 0:
+            if ts < midnight:
                 daily[ts.date()] += mean
         return dict(daily)
 
