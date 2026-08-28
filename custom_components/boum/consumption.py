@@ -105,7 +105,9 @@ def calculate_water_usage_from_level(
       3. A drop beyond the deadband is booked as consumption and pulls the
          baseline down.  A rise beyond it is inflow (rain entering through the
          lid, or a refill): it only moves the baseline up and never cancels
-         consumption booked earlier.
+         consumption booked earlier.  Whatever the level had lost before the
+         inflow arrived is settled first, so re-anchoring upwards cannot
+         swallow consumption that was still pending under the deadband.
       4. Each confirmed drop is spread evenly over the hours it spans, which
          establishes how much the tank lost on each day.
       5. That daily loss is flattened into an even hourly rate for the day, so
@@ -143,6 +145,14 @@ def calculate_water_usage_from_level(
             _spread_drop(loss, hours, anchor, i, delta)
         elif -delta <= deadband_l:  # inside the band — sensor artefact
             continue
+        else:  # confirmed inflow — rain through the lid, or a refill
+            # Settle what the level had already lost before the inflow
+            # arrived.  Re-anchoring upwards otherwise discards the
+            # sub-deadband amount still pending at that moment, so a refill
+            # silently erased up to a full deadband of real consumption.
+            pending = baseline - levels[i - 1]
+            if pending > 0.0:
+                _spread_drop(loss, hours, anchor, i - 1, pending)
         # Both a confirmed drop and confirmed inflow re-anchor the baseline.
         baseline = levels[i]
         anchor = i
