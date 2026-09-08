@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterator
-from datetime import date, datetime
+from datetime import datetime
 
 
 def _rolling_median(values: list[float], window: int) -> list[float]:
@@ -27,59 +27,54 @@ def _rolling_median(values: list[float], window: int) -> list[float]:
     return out
 
 
+_BACKGROUND_SHARE = 0.15
+"""Fraction of a confirmed drop treated as continuous background loss.
+
+Sized to roughly the evaporation share of a typical span: with one irrigation
+per day and evaporation far below the deadband, a span covers about a litre of
+irrigation plus a tenth of a litre of evaporation.  Its only job is to keep
+every hour of a span above zero — the rest follows the level steps.
+"""
+
+
 def _spread_drop(
-    usage: dict[datetime, float],
+    loss: dict[datetime, float],
     hours: list[datetime],
+    levels: list[float],
     start: int,
     end: int,
     total: float,
 ) -> None:
-    """Book *total* litres evenly across hours[start:end].
+    """Book *total* litres across hours[start:end], shaped by the level steps.
 
-    The previous version weighted the drop by the raw per-hour steps, which
-    gave weight 0 — and therefore a hard zero — to every hour whose smoothed
-    level happened to read flat or minimally up.  With slow consumption that is
-    most hours, and it was the main source of the isolated zeros in the hourly
-    series.  Those steps are noise at this scale anyway; what the tracker
-    actually establishes is that *total* litres left the tank somewhere within
-    the span, not which hour of it.
+    A span is not homogeneous.  It typically holds one irrigation, which the
+    level records as a sharp step in a single hour, plus evaporation running
+    continuously underneath.  The per-hour steps carry exactly that
+    distinction, so most of the drop follows them.
+
+    Spreading the whole drop evenly instead — as an earlier version did —
+    smeared each irrigation backwards across every hour since the previous one.
+    Because evaporation never breaks the deadband, that anchor is a full day
+    back, so a single watering was spread over the preceding 24 hours and the
+    rolling 24 h sensor sawtoothed by a factor of five.
+
+    A fixed _BACKGROUND_SHARE is still spread evenly, which is both physically
+    right for the evaporation part and enough to keep hours whose step reads
+    flat from landing on exactly zero.
     """
     span = hours[start:end]
     if not span:
         return
-    share = total / len(span)
-    for hour in span:
-        usage[hour] += share
 
+    steps = [max(0.0, levels[j] - levels[j + 1]) for j in range(start, end)]
+    weight = sum(steps)
+    background = total * _BACKGROUND_SHARE / len(span)
+    shaped = total - total * _BACKGROUND_SHARE
 
-def _smooth_over_days(
-    loss_by_hour: dict[datetime, float],
-) -> dict[datetime, float]:
-    """Flatten each day's measured loss into an even hourly rate.
-
-    Evaporation, seepage and irrigation all leave the tank far too slowly to
-    break the deadband inside a single hour, so the hour-level timing of a loss
-    is not in the level data to begin with.  What the tracker does establish
-    reliably is the total per day.  Spreading that total evenly over the day
-    keeps the daily figures — the ones the forecast trains on — exactly as
-    measured, and gives every hour a share instead of leaving the hours between
-    two confirmed drops at zero.
-
-    The pump log is deliberately not consulted here.  It would supply exact
-    timing, but its volumes cannot be trusted (the API reports them far too
-    high), and anything derived from them would pull the measured consumption
-    with it.  Water Usage is therefore purely what the tank level shows.
-    """
-    hours_by_day: defaultdict[date, list[datetime]] = defaultdict(list)
-    for hour in loss_by_hour:
-        hours_by_day[hour.date()].append(hour)
-
-    usage: dict[datetime, float] = {}
-    for day_hours in hours_by_day.values():
-        share = sum(loss_by_hour[hour] for hour in day_hours) / len(day_hours)
-        for hour in day_hours:
-            usage[hour] = share
-    return usage
+    for offset, hour in enumerate(span):
+        loss[hour] += background + (
+            shaped * steps[offset] / weight if weight > 0 else shaped / len(span)
+        )
 
 
 def calculate_water_usage_from_level(
@@ -108,11 +103,11 @@ def calculate_water_usage_from_level(
          consumption booked earlier.  Whatever the level had lost before the
          inflow arrived is settled first, so re-anchoring upwards cannot
          swallow consumption that was still pending under the deadband.
-      4. Each confirmed drop is spread evenly over the hours it spans, which
-         establishes how much the tank lost on each day.
-      5. That daily loss is flattened into an even hourly rate for the day, so
-         no hour is left at zero just because it sits between two confirmed
-         drops (see _smooth_over_days).
+      4. Each confirmed drop is booked across the hours it spans, shaped by the
+         per-hour level steps so an irrigation lands on the hour it happened
+         in, with a small even background share (see _spread_drop).
+      5. Whatever is still pending when the readings run out is settled too,
+         so the newest hours are not left empty until the next confirmation.
 
     Because inflow and outflow are processed in sequence rather than netted
     against each other, slow rain does not mask real consumption.
@@ -136,13 +131,14 @@ def calculate_water_usage_from_level(
 
     # The newest hour has no successor, so it can never carry a drop.
     loss: dict[datetime, float] = {ts: 0.0 for ts in hours[:-1]}
+    last = len(levels) - 1
 
     baseline = levels[0]
     anchor = 0
     for i in range(1, len(levels)):
         delta = baseline - levels[i]
         if delta > deadband_l:  # confirmed outflow
-            _spread_drop(loss, hours, anchor, i, delta)
+            _spread_drop(loss, hours, levels, anchor, i, delta)
         elif -delta <= deadband_l:  # inside the band — sensor artefact
             continue
         else:  # confirmed inflow — rain through the lid, or a refill
@@ -152,12 +148,19 @@ def calculate_water_usage_from_level(
             # silently erased up to a full deadband of real consumption.
             pending = baseline - levels[i - 1]
             if pending > 0.0:
-                _spread_drop(loss, hours, anchor, i - 1, pending)
+                _spread_drop(loss, hours, levels, anchor, i - 1, pending)
         # Both a confirmed drop and confirmed inflow re-anchor the baseline.
         baseline = levels[i]
         anchor = i
 
-    return _smooth_over_days(loss)
+    # Settle the tail.  Consumption after the last confirmation used to sit
+    # unbooked until the next one, which left the newest hours empty and made
+    # the 24 h sensor drop out for an hour a day, right after watering.
+    pending = baseline - levels[last]
+    if pending > 0.0:
+        _spread_drop(loss, hours, levels, anchor, last, pending)
+
+    return loss
 
 
 def iter_pump_events(log_entries: list[dict]) -> Iterator[tuple[datetime, float]]:
