@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
 from homeassistant.components.recorder.statistics import (
+    STATISTIC_UNIT_TO_UNIT_CONVERTER,
     async_add_external_statistics,
     statistics_during_period,
 )
@@ -42,6 +43,13 @@ _STAT_FIELDS: tuple[tuple[str, str, str, str], ...] = (
     ("inputCurrent",    "input_current",    "Input Current",    "A"),
     ("wifiStrength",    "wifi_strength",    "Wi-Fi Strength",   "dBm"),
 )
+
+
+def _unit_class(unit: str | None) -> str | None:
+    """Return the unit class the recorder uses for a unit."""
+    if converter := STATISTIC_UNIT_TO_UNIT_CONVERTER.get(unit):
+        return converter.UNIT_CLASS
+    return None
 
 
 def _iqr_filter_low(vals: list[float]) -> list[float]:
@@ -163,6 +171,7 @@ async def _async_write_summing_stat(
         name=name,
         source=DOMAIN,
         statistic_id=stat_id,
+        unit_class=_unit_class(unit),
         unit_of_measurement=unit,
     )
     async_add_external_statistics(hass, meta, stat_data)
@@ -253,6 +262,7 @@ def import_statistics(
             name=f"Boum {short_id} {display_name}",
             source=DOMAIN,
             statistic_id=f"{DOMAIN}:{short_id}_{id_suffix}",
+            unit_class=_unit_class(unit),
             unit_of_measurement=unit,
         )
         async_add_external_statistics(hass, meta, stats)
